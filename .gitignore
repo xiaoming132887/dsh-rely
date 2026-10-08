@@ -1,0 +1,13 @@
+# 依赖（本插件只 peer-require 宿主提供的模块，不进版本库）
+node_modules/
+
+# 日志与临时文件
+*.log
+*.tmp
+.DS_Store
+
+# 本地状态 / 密钥（绝不入库）
+state.json
+.credentials.yaml
+.env
+.env.*

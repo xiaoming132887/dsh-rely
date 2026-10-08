@@ -1,0 +1,8 @@
+# dsh-rely bundle patch
+- insert:
+    - id: dsh-rely
+      name: dsh-rely
+      config:
+        refreshIntervalMs: 30000
+        clientPollIntervalMs: 30000
+        timeoutMs: 8000
