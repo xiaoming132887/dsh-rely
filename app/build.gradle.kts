@@ -87,6 +87,14 @@ android {
     }
 
     buildTypes {
+        debug {
+            // 固定签名：签名材料齐全时 debug 包也用同一把 release key，
+            // 这样 CI 每次打包的 debug APK 都能互相覆盖安装（不会出现「签名冲突」）。
+            // 未配置签名时回落到默认 debug keystore，不影响 fork/PR 构建。
+            if (releaseSigningReady) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

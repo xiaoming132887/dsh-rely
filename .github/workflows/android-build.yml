@@ -3,7 +3,7 @@ name: android-build
 # dsh-android 构建流水线
 # v1.2.120 · 2026-10-13 — 全量触发 + 结果监视
 #
-# 双架构矩阵（arm64-v8a 真机 / x86_64 模拟器）：
+# 单架构矩阵（arm64-v8a 真机；x86_64 模拟器版已按用户要求移除）：
 #   build-hardssh-plugin —— 从 GitHub 固定 ref 拉取 @tiphareth/dsh-hardssh 源码并构建
 #   collect-runtime —— 从 Termux 仓库收集对应架构 node 运行时 + 注入内置 SSH 插件 → runtime.zip
 #   build-apk       —— 注入 runtime.zip 进 assets → gradle -Pabi=... 出 APK
@@ -104,8 +104,6 @@ jobs:
         include:
           - termux_arch: aarch64
             abi: arm64-v8a
-          - termux_arch: x86_64
-            abi: x86_64
     runs-on: ubuntu-24.04
     needs: [build-hardssh-plugin]
     steps:
@@ -188,8 +186,6 @@ jobs:
         include:
           - termux_arch: aarch64
             abi: arm64-v8a
-          - termux_arch: x86_64
-            abi: x86_64
     runs-on: ubuntu-24.04
     needs: [collect-runtime]
     # 正式签名材料（v1.4.18）：GitHub Secrets 注入为环境变量，供下方解码/构建步骤使用。
@@ -416,7 +412,7 @@ jobs:
           body: |
             自动构建：v${{ steps.ver.outputs.version }} (versionCode ${{ steps.ver.outputs.versionCode }}) · build ${{ github.run_number }}
 
-            架构：arm64-v8a（真机）+ x86_64（模拟器）
+            架构：arm64-v8a（真机）
             签名：debug（此 Fork 的自动分发渠道）
 
             - 已通过：运行时闭包校验（含内置 SSH 插件）、so 16KB 页对齐、APK ABI 校验、i18n 一致性
@@ -464,7 +460,7 @@ jobs:
           ls -lh apk/
           V=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
           REF="${GITHUB_REF_NAME//\//-}"
-          for abi in arm64-v8a x86_64; do
+          for abi in arm64-v8a; do
             if [ "$REF" = "v$V" ]; then BASE="dsh-android-${REF}-${abi}"; else BASE="dsh-android-${REF}-${abi}-v${V}"; fi
             test -f "apk/${BASE}-release.apk"
             test -f "apk/${BASE}-debug.apk"
@@ -547,7 +543,7 @@ jobs:
           ls -lh apk/
           V=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
           REF="${GITHUB_REF_NAME//\//-}"
-          for abi in arm64-v8a x86_64; do
+          for abi in arm64-v8a; do
             if [ "$REF" = "v$V" ]; then BASE="dsh-android-${REF}-${abi}"; else BASE="dsh-android-${REF}-${abi}-v${V}"; fi
             test -f "apk/${BASE}-debug.apk"
             test -f "apk/${BASE}-release.apk" || {
@@ -615,8 +611,8 @@ jobs:
             echo "| Leg | Ergebnis |"
             echo "|---|---|"
             echo "| build-hardssh-plugin (GitHub ${{ env.HARDSSH_REF }}) | ${{ needs.build-hardssh-plugin.result }} |"
-            echo "| collect-runtime (aarch64 + x86_64) | ${{ needs.collect-runtime.result }} |"
-            echo "| build-apk (arm64-v8a + x86_64) | ${{ needs.build-apk.result }} |"
+            echo "| collect-runtime (aarch64 · arm64-v8a) | ${{ needs.collect-runtime.result }} |"
+            echo "| build-apk (arm64-v8a) | ${{ needs.build-apk.result }} |"
             echo "| publish-release (tag v*) | ${{ needs.publish-release.result }} |"
             echo "| publish-edge (push main) | ${{ needs.publish-edge.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"

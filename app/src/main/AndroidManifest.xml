@@ -140,6 +140,13 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
+        <!-- 日志查看器（engine.log / boot.log 尾部） -->
+        <activity
+            android:name=".LogViewerActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard" />
+
         <!-- 真 PTY 终端（对齐 DSHA 的 PtyTerminalFragment）：Termux TerminalView +
              自带 bash。exported=false：只由本应用拉起。adjustResize 让软键盘顶起终端。 -->
         <activity

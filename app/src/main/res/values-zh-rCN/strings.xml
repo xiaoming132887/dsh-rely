@@ -585,4 +585,10 @@
     <string name="terminal_start_failed">终端启动失败：%1$s</string>
     <string name="terminal_close_failed">关闭失败，会话仍保留：%1$s</string>
     <string name="terminal_session_ended_hint">会话已结束，请点击「新建」</string>
+    <!-- 日志查看器 -->
+    <string name="btn_log">日志</string>
+    <string name="log_viewer_title">日志</string>
+    <string name="log_viewer_refresh">刷新</string>
+    <string name="log_viewer_empty">暂无日志\n引擎启动后这里会显示 engine.log / boot.log 的尾部</string>
+    <string name="log_viewer_size">%1$s · %2$s 字节</string>
 </resources>

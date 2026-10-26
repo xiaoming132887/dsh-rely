@@ -586,4 +586,10 @@ You can still continue without updating, but the interface will not display.</st
     <string name="terminal_start_failed">Terminal failed to start: %1$s</string>
     <string name="terminal_close_failed">Close failed, session kept: %1$s</string>
     <string name="terminal_session_ended_hint">Session has ended — tap “New”</string>
+    <!-- 日志查看器 -->
+    <string name="btn_log">Logs</string>
+    <string name="log_viewer_title">Logs</string>
+    <string name="log_viewer_refresh">Refresh</string>
+    <string name="log_viewer_empty">No log yet\nThe tail of engine.log / boot.log will show here once the engine has started.</string>
+    <string name="log_viewer_size">%1$s · %2$s bytes</string>
 </resources>

@@ -595,4 +595,10 @@ Sie können auch ohne Update fortfahren, die Oberfläche wird dann aber nicht an
     <string name="terminal_start_failed">Terminal konnte nicht gestartet werden: %1$s</string>
     <string name="terminal_close_failed">Schließen fehlgeschlagen, Sitzung bleibt: %1$s</string>
     <string name="terminal_session_ended_hint">Sitzung ist beendet – tippe „Neu“</string>
+    <!-- Logbetrachter -->
+    <string name="btn_log">Logs</string>
+    <string name="log_viewer_title">Logs</string>
+    <string name="log_viewer_refresh">Aktualisieren</string>
+    <string name="log_viewer_empty">Noch kein Log\nSobald die Engine gestartet ist, erscheint hier das Ende von engine.log / boot.log.</string>
+    <string name="log_viewer_size">%1$s · %2$s Bytes</string>
 </resources>
