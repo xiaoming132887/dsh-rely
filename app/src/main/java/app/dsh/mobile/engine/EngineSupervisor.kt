@@ -656,6 +656,16 @@ class EngineSupervisor(private val ctx: Context) {
                         val status = proc.exitFuture.get()
                         if (shouldExitLoop()) break
                         Log.w(TAG, "engine exited, raw status=0x${status.toString(16)}")
+                        // 把退出原因写进 engine.log（用户分享日志时能看到是信号杀还是退出码），
+                        // 否则只能靠 logcat 排查引擎「起来又没了」这种静默重启。
+                        runCatching {
+                            EngineLog.append(
+                                logFile(),
+                                "engine exited, raw status=0x${status.toString(16)} " +
+                                    "(signal=${status and 0x7f}, core=${(status and 0x80) != 0}, " +
+                                    "exitCode=${(status shr 8) and 0xff})",
+                            )
+                        }
                         // v1.4.16（审查 P1）：健康运行的引擎退出、即将自动重启时，
                         // 重置启动墙钟——新一轮「用户可见启动」从旧引擎死亡时起算。
                         // 旧实现只有 Healthy 分支一个重置点，健康跑超 5 分钟后崩溃，
