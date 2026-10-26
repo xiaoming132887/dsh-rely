@@ -903,6 +903,37 @@ class EngineSupervisor(private val ctx: Context) {
     }
 
     /**
+     * 通过 /proc/net/tcp 找到正在 LISTEN 127.0.0.1:3080（或 0.0.0.0:3080）的 pid。
+     *
+     * 3080 = 0x0C08；LISTEN 状态 = 0A。`/proc/net/tcp` 的 local_address 是
+     * 「小端十六进制 IP:端口」；比对 inode 时扫 `/proc/<pid>/fd` 里的
+     * `socket:[inode]` 软链，比 cmdline 关键字匹配可靠得多 —— 后者抓不到
+     * 换过 argv 或非 node 壳进程占端口的情况（用户报的 EADDRINUSE 无限重启）。
+     */
+    private fun pidListeningOn3080(): Int? = runCatching {
+        val hexPort = "0C08"
+        val inode = File("/proc/net/tcp").readLines().asSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .firstOrNull { line ->
+                val parts = line.split(Regex("\\s+"))
+                parts.size > 9 && parts[3] == "0A" && parts[1].endsWith(":$hexPort")
+            }
+            ?.split(Regex("\\s+"))
+            ?.getOrNull(9)
+            ?: return@runCatching null
+        val target = "socket:[$inode]"
+        File("/proc").listFiles()?.firstOrNull { dir ->
+            dir.name.all { it.isDigit() } && runCatching {
+                File(dir, "fd").listFiles()?.any { fd ->
+                    runCatching { android.system.Os.readlink(fd.absolutePath) }
+                        .getOrNull() == target
+                } == true
+            }.getOrDefault(false)
+        }?.name?.toIntOrNull()
+    }.getOrNull()
+
+    /**
      * 强制回收 3080：清掉所有占着它的引擎 node 残留（v1.3.1）。
      *
      * ⚠️ Root 模式的孤儿为什么清不干净（用户报的二次启动失败）：
@@ -911,16 +942,26 @@ class EngineSupervisor(private val ctx: Context) {
      * 于是 node 以 uid 0 变孤儿继续监听 3080。而 app uid 的 `pkill` 对 root 进程
      * 必然 EPERM，唯一的指望是 su 那条。
      *
-     * 因此这里做三件事：
-     *  ① 同 uid pkill（普通模式的孤儿）；
-     *  ② su 兜底 pkill（Root 模式的孤儿）—— 用 `findSu` 覆盖 Magisk/KernelSU 路径；
-     *  ③ **兜底再确认**：清完仍被占就再补一轮，并把结果写进日志（不再静默）。
+     * 因此这里做四件事：
+     *  ① 按 /proc/net/tcp 精确定位占 3080 的 pid 并 kill（新，覆盖非 node 壳进程）；
+     *  ② 同 uid pkill（普通模式的孤儿）；
+     *  ③ su 兜底 pkill（Root 模式的孤儿）—— 用 `findSu` 覆盖 Magisk/KernelSU 路径；
+     *  ④ **兜底再确认**：清完仍被占就再补一轮，并把结果写进日志（不再静默）。
      *
      * ⚠️ 必须排除 LAN 反向代理（`lan-web-proxy`）：它的 cmdline 里同样含
      * `files/engine/bin/node`，误杀会让「局域网访问」在每次引擎重启后静默失效。
      */
     private fun reclaimPort() {
         Log.w(TAG, "port ${EngineConfig.DEFAULT_PORT} in use — reclaiming (orphan engine node)")
+        // ① 先按端口精确 kill（能覆盖 cmdline 不是 node 的占位进程）
+        pidListeningOn3080()?.takeIf { it > 1 }?.let { pid ->
+            Log.w(TAG, "reclaimPort: killing pid $pid which is listening on ${EngineConfig.DEFAULT_PORT}")
+            runCatching {
+                val p = ProcessBuilder("/system/bin/sh", "-c", "kill -9 $pid").start()
+                if (!p.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) runCatching { p.destroy() }
+            }
+            Privilege.runSu("kill -9 $pid")
+        }
         // shell 脚本里的 $ 用 $ 拼接（Kotlin 会把 "$p" 当模板变量解析）
         val d = "$"
         val killCmd =
@@ -929,7 +970,7 @@ class EngineSupervisor(private val ctx: Context) {
                 "case \"" + d + "c\" in *files/engine/bin/node*) " +
                 "case \"" + d + "c\" in *lan-web-proxy*) continue;; esac; " +
                 "kill -9 " + d + "p 2>/dev/null;; esac; done; true"
-        // ① 同 uid（普通模式孤儿）
+        // ② 同 uid（普通模式孤儿）
         runCatching {
             // v1.4.9：加超时 —— 这个 kill 脚本要遍历 /proc，若某个进程的 cmdline
             // 读取卡住（僵尸/内核态 D 状态），无界 waitFor 会让整个监督循环停住。
@@ -939,9 +980,9 @@ class EngineSupervisor(private val ctx: Context) {
                 Log.w(TAG, "reclaimPort: same-uid sweep timed out (3s) — continuing")
             }
         }
-        // ② su 兜底（Root 模式孤儿；su 不可用时 runSu 自己会静默返回 null）
+        // ③ su 兜底（Root 模式孤儿；su 不可用时 runSu 自己会静默返回 null）
         Privilege.runSu(killCmd)
-        // ③ 等端口真正释放；仍占用则再补一轮 su 清场（可能是刚被拉起的新进程）
+        // ④ 等端口真正释放；仍占用则再补一轮 su 清场（可能是刚被拉起的新进程）
         waitPortFree(1_800)
         if (portInUse(400)) {
             Log.w(TAG, "port still in use after first sweep — retrying via su")

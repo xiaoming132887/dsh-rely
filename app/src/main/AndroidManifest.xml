@@ -194,5 +194,16 @@
                 android:name="moe.shizuku.client.VERSION_CODE"
                 android:value="13" />
         </provider>
+        <!-- 日志/内部文件分享：把 filesDir 里打不开的日志文件复制到 cache 后，
+             经 FileProvider 以 content:// 交给系统分享面板（微信/QQ/文件管理器等）。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

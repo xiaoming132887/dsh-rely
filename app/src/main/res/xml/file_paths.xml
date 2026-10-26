@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 可分享路径。只在分享时把日志复制到 cache/shared 再暴露，
+     绝不暴露整个 filesDir 根目录（避免 dsh-home 工作区/凭据外流）。 -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="shared" path="shared/" />
+</paths>

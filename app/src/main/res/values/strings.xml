@@ -592,4 +592,5 @@ You can still continue without updating, but the interface will not display.</st
     <string name="log_viewer_refresh">Refresh</string>
     <string name="log_viewer_empty">No log yet\nThe tail of engine.log / boot.log will show here once the engine has started.</string>
     <string name="log_viewer_size">%1$s · %2$s bytes</string>
+    <string name="log_viewer_share">Share</string>
 </resources>

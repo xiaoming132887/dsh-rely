@@ -42,10 +42,21 @@
             android:textSize="13sp" />
 
         <TextView
-            android:id="@+id/log_viewer_refresh"
+            android:id="@+id/log_viewer_share"
             android:layout_width="wrap_content"
             android:layout_height="match_parent"
             android:layout_marginStart="6dp"
+            android:gravity="center"
+            android:paddingHorizontal="12dp"
+            android:text="@string/log_viewer_share"
+            android:textColor="#FF7DD3FC"
+            android:textSize="13sp"
+            android:background="?android:attr/selectableItemBackground" />
+
+        <TextView
+            android:id="@+id/log_viewer_refresh"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
             android:gravity="center"
             android:paddingHorizontal="12dp"
             android:text="@string/log_viewer_refresh"

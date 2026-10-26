@@ -2,7 +2,9 @@ package app.dsh.mobile
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -11,6 +13,7 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.content.FileProvider
 import app.dsh.mobile.engine.EngineConfig
 import java.io.File
 import java.io.RandomAccessFile
@@ -70,6 +73,7 @@ class LogViewerActivity : Activity() {
 
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
         findViewById<View>(R.id.log_viewer_refresh).setOnClickListener { refresh() }
+        findViewById<View>(R.id.log_viewer_share).setOnClickListener { shareCurrent() }
 
         renderFileChips()
         refresh()
@@ -145,6 +149,37 @@ class LogViewerActivity : Activity() {
                 val scroll = tv.parent as? ScrollView
                 scroll?.post { scroll.fullScroll(View.FOCUS_DOWN) }
                 sizeText?.text = getString(R.string.log_viewer_size, target.absolutePath, size.toString())
+            }
+        }
+    }
+
+    /** 把当前日志文件复制到 cache 并通过系统分享面板发出去。 */
+    private fun shareCurrent() {
+        val src = fileAt(selected)
+        if (!src.isFile) {
+            android.widget.Toast.makeText(this, R.string.log_viewer_empty, android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        io.execute {
+            val out = File(cacheDir, "shared/${src.name}")
+            runCatching {
+                out.parentFile?.mkdirs()
+                src.copyTo(out, overwrite = true)
+                val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", out)
+                mainHandler.post {
+                    runCatching {
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        startActivity(Intent.createChooser(intent, getString(R.string.log_viewer_share)))
+                    }
+                }
+            }.onFailure {
+                mainHandler.post {
+                    android.widget.Toast.makeText(this, it.message ?: "share failed", android.widget.Toast.LENGTH_LONG).show()
+                }
             }
         }
     }

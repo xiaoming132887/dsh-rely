@@ -591,4 +591,5 @@
     <string name="log_viewer_refresh">刷新</string>
     <string name="log_viewer_empty">暂无日志\n引擎启动后这里会显示 engine.log / boot.log 的尾部</string>
     <string name="log_viewer_size">%1$s · %2$s 字节</string>
+    <string name="log_viewer_share">分享</string>
 </resources>

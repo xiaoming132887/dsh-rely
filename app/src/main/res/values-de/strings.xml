@@ -601,4 +601,5 @@ Sie können auch ohne Update fortfahren, die Oberfläche wird dann aber nicht an
     <string name="log_viewer_refresh">Aktualisieren</string>
     <string name="log_viewer_empty">Noch kein Log\nSobald die Engine gestartet ist, erscheint hier das Ende von engine.log / boot.log.</string>
     <string name="log_viewer_size">%1$s · %2$s Bytes</string>
+    <string name="log_viewer_share">Teilen</string>
 </resources>
