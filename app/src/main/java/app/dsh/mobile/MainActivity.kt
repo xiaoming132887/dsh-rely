@@ -147,6 +147,10 @@ class MainActivity : Activity() {
         }
         // 隐藏工具栏：一键收起让网页全屏（点顶部小把手唤回）
         findViewById<TextView>(R.id.btnHide).setOnClickListener { toggleToolbar() }
+        // 原生终端入口：跳转独立终端页（真 PTY，自带 bash）
+        findViewById<View>(R.id.btnTerminal).setOnClickListener {
+            startActivity(Intent(this, TerminalActivity::class.java))
+        }
         // 齿轮按钮：跳转独立设置页
         findViewById<View>(R.id.btnMore).setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))

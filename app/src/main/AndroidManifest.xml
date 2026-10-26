@@ -140,6 +140,15 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
+        <!-- 真 PTY 终端（对齐 DSHA 的 PtyTerminalFragment）：Termux TerminalView +
+             自带 bash。exported=false：只由本应用拉起。adjustResize 让软键盘顶起终端。 -->
+        <activity
+            android:name=".TerminalActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard" />
+
         <service
             android:name=".service.EngineService"
             android:exported="false"

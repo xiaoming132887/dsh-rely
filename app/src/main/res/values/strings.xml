@@ -570,4 +570,20 @@ You can still continue without updating, but the interface will not display.</st
     <string name="export_log_hint">No backup file was kept. Details are in engine.log (lines starting with [export]).</string>
     <string name="export_no_creds">API keys and logins are not included. Sign in again after restoring.</string>
     <string name="export_no_registry">Warning: the workspace list (workspace.json) was not found, so conversations may not appear in the list after restoring.</string>
+    <!-- 原生终端（对齐 DSHA 的 PTY 终端页） -->
+    <string name="btn_terminal">Terminal</string>
+    <string name="terminal_title">Terminal</string>
+    <string name="terminal_new">New</string>
+    <string name="terminal_empty">No terminal\nTap “New” to open one</string>
+    <string name="terminal_number">Terminal %1$d</string>
+    <string name="terminal_closing">Terminal %1$d · closing…</string>
+    <string name="terminal_switch_to">Switch to terminal %1$d</string>
+    <string name="terminal_close">Close terminal %1$d</string>
+    <string name="terminal_font_smaller">A−</string>
+    <string name="terminal_font_larger">A+</string>
+    <string name="terminal_session_ended">Session ended (exit %1$s)</string>
+    <string name="terminal_copied">Copied</string>
+    <string name="terminal_start_failed">Terminal failed to start: %1$s</string>
+    <string name="terminal_close_failed">Close failed, session kept: %1$s</string>
+    <string name="terminal_session_ended_hint">Session has ended — tap “New”</string>
 </resources>

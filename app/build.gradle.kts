@@ -108,6 +108,14 @@ android {
         // 这些是刻意的兼容性决策，不阻断构建。
         abortOnError = false
     }
+
+    packaging {
+        jniLibs {
+            // 真 PTY 终端：使用本仓库自行重编的 16 KB 页对齐 libtermux.so
+            // （jniLibs/ 下），覆盖 terminal-view AAR 依赖带入的 4 KB 页旧库。
+            pickFirsts += listOf("**/libtermux.so")
+        }
+    }
 }
 
 
@@ -336,4 +344,10 @@ dependencies {
     // 不依赖 Google Play 服务（国内 ROM 可用）。无障碍节点树缺失的场景
     // （WebView 不暴露节点、自绘/Canvas 界面）从截图提取文字作为 dump 兜底。
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    // 真 PTY 终端（对齐 DSHA）：Termux 拆出的 terminal-view / terminal-emulator
+    // （Apache 2.0）。坐标是 JitPack 多模块真实 groupId（com.termux.termux-app）。
+    // AAR 自带的 jni/.../libtermux.so 为 4 KB 页对齐，Android 15+ 的 16 KB 页内核
+    // 真机上 dlopen 会失败 —— 本仓库用 scripts/termux-jni 重编了同版本 16 KB 页
+    // 对齐的 libtermux.so（jniLibs/ 下），由 packaging.pickFirsts 覆盖 AAR 旧库。
+    implementation("com.termux.termux-app:terminal-view:0.118.0")
 }

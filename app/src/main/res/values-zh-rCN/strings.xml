@@ -569,4 +569,20 @@
     <string name="export_log_hint">未保留任何备份文件。详细原因已写入 engine.log（以 [export] 开头的行）。</string>
     <string name="export_no_creds">不包含 API 密钥与登录态，恢复后需要重新登录。</string>
     <string name="export_no_registry">注意：未找到工作区列表（workspace.json），恢复后对话可能不会出现在列表里。</string>
+    <!-- 原生终端（对齐 DSHA 的 PTY 终端页） -->
+    <string name="btn_terminal">终端</string>
+    <string name="terminal_title">终端</string>
+    <string name="terminal_new">新建</string>
+    <string name="terminal_empty">暂无终端\n点击「新建」打开一个终端</string>
+    <string name="terminal_number">终端 %1$d</string>
+    <string name="terminal_closing">终端 %1$d · 关闭中…</string>
+    <string name="terminal_switch_to">切换到终端 %1$d</string>
+    <string name="terminal_close">关闭终端 %1$d</string>
+    <string name="terminal_font_smaller">A−</string>
+    <string name="terminal_font_larger">A+</string>
+    <string name="terminal_session_ended">会话已结束（退出码 %1$s）</string>
+    <string name="terminal_copied">已复制</string>
+    <string name="terminal_start_failed">终端启动失败：%1$s</string>
+    <string name="terminal_close_failed">关闭失败，会话仍保留：%1$s</string>
+    <string name="terminal_session_ended_hint">会话已结束，请点击「新建」</string>
 </resources>

@@ -1293,7 +1293,7 @@ object EngineConfig {
      * 若因解压不完整等原因缺失，退回 runtime 里的 `bin/sh`，再退回系统 toybox sh。
      * 绝不返回 Termux 前缀——那条路径在本机永远不存在。
      */
-    private fun shellPathFor(root: File): String {
+    fun shellPathFor(root: File): String {
         val bash = File(root, "bin/bash")
         if (bash.canExecute()) return bash.absolutePath
         val sh = File(root, "bin/sh")
