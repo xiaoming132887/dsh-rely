@@ -579,4 +579,20 @@ Sie können auch ohne Update fortfahren, die Oberfläche wird dann aber nicht an
     <string name="export_log_hint">Es wurde keine Sicherungsdatei behalten. Details stehen in engine.log (Zeilen mit [export]).</string>
     <string name="export_no_creds">API-Schlüssel und Anmeldungen sind nicht enthalten. Nach dem Wiederherstellen erneut anmelden.</string>
     <string name="export_no_registry">Hinweis: Die Arbeitsbereichsliste (workspace.json) wurde nicht gefunden. Unterhaltungen erscheinen nach dem Wiederherstellen eventuell nicht in der Liste.</string>
+    <!-- Native Terminal (an DSHA PTY-Terminal angelehnt) -->
+    <string name="btn_terminal">Terminal</string>
+    <string name="terminal_title">Terminal</string>
+    <string name="terminal_new">Neu</string>
+    <string name="terminal_empty">Kein Terminal\nTippe „Neu“, um eines zu öffnen</string>
+    <string name="terminal_number">Terminal %1$d</string>
+    <string name="terminal_closing">Terminal %1$d · wird geschlossen…</string>
+    <string name="terminal_switch_to">Zu Terminal %1$d wechseln</string>
+    <string name="terminal_close">Terminal %1$d schließen</string>
+    <string name="terminal_font_smaller">A−</string>
+    <string name="terminal_font_larger">A+</string>
+    <string name="terminal_session_ended">Sitzung beendet (Exit %1$s)</string>
+    <string name="terminal_copied">Kopiert</string>
+    <string name="terminal_start_failed">Terminal konnte nicht gestartet werden: %1$s</string>
+    <string name="terminal_close_failed">Schließen fehlgeschlagen, Sitzung bleibt: %1$s</string>
+    <string name="terminal_session_ended_hint">Sitzung ist beendet – tippe „Neu“</string>
 </resources>
