@@ -724,4 +724,3 @@ Sie können auch ohne Update fortfahren, die Oberfläche wird dann aber nicht an
     <string name="about_runtime_no_pin">Signierter Runtime-Index nicht verfügbar</string>
     <string name="about_runtime_busy">Runtime wird installiert – bitte warten</string>
 </resources>
-</resources>
