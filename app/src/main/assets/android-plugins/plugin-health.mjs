@@ -85,6 +85,24 @@ function safeGet(ctx, service) {
   }
 }
 
+/**
+ * 取 loader 服务。⚠️ 不能写 `safeGet(ctx,"loader") || ctx.loader`：
+ * Cordis 的 accessor 在 **context 已经 inactive**（引擎正在退出/重启）时会直接
+ * throw「cannot get required service "loader" in inactive context」—— 而这句
+ * 代码跑在 setInterval 的回调里，一旦抛出就是未捕获异常，整个引擎进程当场崩溃，
+ * 监督器再拉起 → 再崩 → 无限重启循环（真机日志：engine.log 反复出现
+ * `fatal uncaught exception ... plugin-health.mjs:219:50`）。这里统一 try/catch。
+ */
+function getLoader(ctx) {
+  const viaGet = safeGet(ctx, "loader");
+  if (viaGet) return viaGet;
+  try {
+    return ctx.loader;
+  } catch {
+    return void 0;
+  }
+}
+
 function writeMarker(value) {
   const file = markerPath();
   if (!file) return;
@@ -126,7 +144,7 @@ function inspect(ctx, options = {}) {
   // timedOut=true 表示「等到超时仍有加载任务在跑」。此时未拿到 fiber 的 entry
   // 可能是**正在 import**，而不是加载失败 —— 必须区分，否则会把正常插件摘掉。
   const timedOut = options.timedOut === true;
-  const loader = safeGet(ctx, "loader") || ctx.loader;
+  const loader = getLoader(ctx);
   const entries = loader && typeof loader.entries === "function" ? [...loader.entries()] : [];
   // 超时窗口内仍无 fiber 的 entry 归入 pending（不参与失败判定）
   const isPending = (entry) =>
@@ -216,23 +234,31 @@ function apply(ctx) {
   let timer;
   const check = () => {
     if (finished) return;
-    const loader = safeGet(ctx, "loader") || ctx.loader;
-    const tasks = loader && typeof loader.getTasks === "function" ? loader.getTasks() : [];
-    const elapsed = Date.now() - started;
-    // 仍在加载中且没超时 → 继续等。
-    if (tasks.length > 0 && elapsed < MAX_WAIT_MS) return;
-    // ⚠️ v1.4.6 关键修复（用户反馈「装了插件重启显示加载失败」）：
-    // 原来超时后**无条件** inspect，而 Cordis 的 Entry.fiber 是在 `await import()`
-    // **成功之后**才赋值的 —— import 期间的 entry 看起来就是「fiber 未定义 = 失败」。
-    // 于是：慢设备上某个正常插件 import 超过 15 秒 → 被判失败 → 监督器摘掉它 →
-    // 用户看到「插件加载失败」，重装又好了（因为第二次加载更快/有缓存）。
-    //
-    // 现在超时后仍然 inspect（报告当前状态），但**标记 timedOut 并跳过失败判定**：
-    // 未完成的 entry 归入 pending，由 PluginRecovery 忽略，绝不据此隔离插件。
-    const timedOut = tasks.length > 0;
-    finished = true;
-    if (timer !== void 0) clearInterval(timer);
-    inspect(ctx, { timedOut });
+    try {
+      const loader = getLoader(ctx);
+      const tasks = loader && typeof loader.getTasks === "function" ? loader.getTasks() : [];
+      const elapsed = Date.now() - started;
+      // 仍在加载中且没超时 → 继续等。
+      if (tasks.length > 0 && elapsed < MAX_WAIT_MS) return;
+      // ⚠️ v1.4.6 关键修复（用户反馈「装了插件重启显示加载失败」）：
+      // 原来超时后**无条件** inspect，而 Cordis 的 Entry.fiber 是在 `await import()`
+      // **成功之后**才赋值的 —— import 期间的 entry 看起来就是「fiber 未定义 = 失败」。
+      // 于是：慢设备上某个正常插件 import 超过 15 秒 → 被判失败 → 监督器摘掉它 →
+      // 用户看到「插件加载失败」，重装又好了（因为第二次加载更快/有缓存）。
+      //
+      // 现在超时后仍然 inspect（报告当前状态），但**标记 timedOut 并跳过失败判定**：
+      // 未完成的 entry 归入 pending，由 PluginRecovery 忽略，绝不据此隔离插件。
+      const timedOut = tasks.length > 0;
+      finished = true;
+      if (timer !== void 0) clearInterval(timer);
+      inspect(ctx, { timedOut });
+    } catch (error) {
+      // 兜底：探针跑在定时器回调里，任何未捕获异常都会直接带崩引擎进程
+      // （→ 监督器重启 → 再崩 → 无限重启循环）。这里吞掉并只写日志。
+      finished = true;
+      if (timer !== void 0) clearInterval(timer);
+      console.error(`[android-plugin-health] check aborted: ${error?.message || error}`);
+    }
   };
   timer = setInterval(check, POLL_MS);
   check();
