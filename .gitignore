@@ -80,3 +80,4 @@ scripts/probes/*.bin
 
 # 本地构建产物与下载的 APK
 /artifacts/
+tasks/

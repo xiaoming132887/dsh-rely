@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# inject-hardssh-plugin.sh —— 把 pack-hardssh-plugin.sh 的产物装进 runtime 根目录。
+# inject-hardssh-plugin.sh —— 【v1.4.20 起已废弃，勿在发布流程使用】
+#
+# hardssh 已与 runtime 解耦：运行时不再包含插件，APK 改为携带 assets/hardssh/
+# 由 App 的 HardsshInstaller 安装（见 scripts/pack-hardssh.sh）。
+# 本脚本仅保留用于本地调试「把插件塞进某个 runtime 目录」的旧场景。
 #
 # 用法: ./scripts/inject-hardssh-plugin.sh <runtime 根目录> <插件目录>
 #
-# 产物落点固定为 <runtime>/lib/node_modules/@tiphareth/dsh-hardssh：
+# 产物落点固定为 <runtime>/lib/node_modules/@xiaopb/dsh-hardssh（旧名 @tiphareth 仅用于让位判断）：
 # App 侧的 EngineConfig.sshPluginDir() 与 CI 闭包校验都按这个路径查找。
 #
 # 单独拆成脚本而不是内联在 collect-termux-runtime.sh 里，是为了能在不跑
@@ -24,8 +28,8 @@ test -f "$PLUGIN/package.json" || {
   exit 1
 }
 PKG_NAME="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PLUGIN/package.json" | head -n1)"
-if [ "$PKG_NAME" != "@tiphareth/dsh-hardssh" ]; then
-  echo "错误：插件目录不是 @tiphareth/dsh-hardssh（实际 name=${PKG_NAME:-<读取失败>}）" >&2
+if [ "$PKG_NAME" != "@xiaopb/dsh-hardssh" ]; then
+  echo "错误：插件目录不是 @xiaopb/dsh-hardssh（实际 name=${PKG_NAME:-<读取失败>}）" >&2
   exit 1
 fi
 
@@ -37,7 +41,7 @@ for f in cordis.patch.yml lib/index.js lib/fs.js lib/subprocess.js lib/client.js
   }
 done
 
-DEST="$ROOT/lib/node_modules/@tiphareth/dsh-hardssh"
+DEST="$ROOT/lib/node_modules/@xiaopb/dsh-hardssh"
 # 与 runtime 同生命周期：整目录替换，避免旧版本残留文件。
 rm -rf "$DEST"
 mkdir -p "$(dirname "$DEST")"
@@ -59,4 +63,4 @@ if "$FIND" "$DEST" -type l -print -quit | grep -q .; then
 fi
 
 VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$DEST/package.json" | head -n1)"
-echo "内置 SSH 插件已集成：@tiphareth/dsh-hardssh@${VERSION:-unknown} ($(du -sh "$DEST" | cut -f1))"
+echo "内置 SSH 插件已集成：@xiaopb/dsh-hardssh@${VERSION:-unknown} ($(du -sh "$DEST" | cut -f1))"

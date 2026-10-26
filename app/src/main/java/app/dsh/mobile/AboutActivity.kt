@@ -1,18 +1,25 @@
 package app.dsh.mobile
 
-import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.os.Build
 import android.os.Bundle
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import app.dsh.mobile.engine.EngineConfig
+import app.dsh.mobile.engine.RepoConfig
+import app.dsh.mobile.engine.RuntimeDownloadConfig
+import app.dsh.mobile.engine.RuntimeIndexClient
+import app.dsh.mobile.engine.RuntimeInstaller
+import org.json.JSONObject
+import java.io.File
 
 /**
  * 关于页（MIUI 风格）：应用标识卡 + 介绍/特性 + 开源地址（点击复制）。
  * v1.4.18：与设置页一致，跟随应用屏幕朝向偏好（不再固定竖屏）。
  */
-class AboutActivity : Activity() {
+class AboutActivity : ThemedActivity() {
 
     override fun attachBaseContext(newBase: android.content.Context) {
         super.attachBaseContext(LocaleHelper.wrap(newBase))
@@ -56,7 +63,130 @@ class AboutActivity : Activity() {
             }
             checkForUpdate()
         }
+
+        // 运行时更新（v1.4.20）：与 App 更新解耦；索引必须验签。
+        // v1.4.21：安装进行中忽略再次点击 —— 否则第二次点击会重新走检查，
+        // 检查完又变成「可安装」，再点一次就撞进安装器（旧版直接抛
+        // “runtime install already in progress”）。
+        findViewById<android.view.View>(R.id.rowRuntime).setOnClickListener {
+            if (runtimeInstalling || RuntimeInstaller.installing) {
+                Toast.makeText(this, R.string.about_runtime_busy, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val pending = pendingRuntime
+            if (pending != null) installRuntime(pending) else checkRuntime()
+        }
     }
+
+    /** 待安装的运行时（检查到更新后由再次点击触发） */
+    private var pendingRuntime: RuntimeIndexClient.Entry? = null
+
+    /** 本页是否已经拉起安装线程（防止同一页面内重复点击） */
+    @Volatile
+    private var runtimeInstalling = false
+
+    private val runtimeIndexUrl: String get() = RepoConfig.RELEASES_LATEST + "/runtime-index.json"
+
+    /** 从设置页读取下载代理；默认 gh-proxy.org，留空则直连。 */
+    private fun runtimeProxy(): String = RuntimeDownloadConfig.proxy(this)
+
+    private fun checkRuntime() {
+        val tv = findViewById<TextView>(R.id.txtRuntime)
+        pendingRuntime = null
+        tv.text = getString(R.string.about_runtime_checking)
+        tv.setTextColor(getColor(R.color.text_secondary))
+        val abi = deviceAbi()
+        val code = currentVersionCode()
+        val proxy = runtimeProxy()
+        Thread({
+            val entry = RuntimeIndexClient.resolve(
+                this, runtimeIndexUrl, proxy, abi, null, code,
+            )
+            runOnUiThread {
+                when {
+                    entry == null -> {
+                        tv.text = getString(
+                            R.string.about_runtime_failed,
+                            getString(R.string.about_runtime_no_pin),
+                        )
+                        tv.setTextColor(getColor(R.color.text_secondary))
+                    }
+                    entry.version == installedRuntimeVersion() -> {
+                        tv.text = getString(R.string.about_runtime_latest, entry.version)
+                        tv.setTextColor(getColor(R.color.success))
+                    }
+                    else -> {
+                        pendingRuntime = entry
+                        tv.text = getString(R.string.about_runtime_available, entry.version)
+                        tv.setTextColor(getColor(R.color.accent))
+                    }
+                }
+            }
+        }, "runtime-check").apply { isDaemon = true; start() }
+    }
+
+    private fun installRuntime(entry: RuntimeIndexClient.Entry) {
+        val tv = findViewById<TextView>(R.id.txtRuntime)
+        tv.text = getString(R.string.about_runtime_installing, 0)
+        tv.setTextColor(getColor(R.color.accent))
+        pendingRuntime = null
+        runtimeInstalling = true
+        val proxy = runtimeProxy()
+        Thread({
+            // 运行中的引擎会持续读 engine/lib；先停引擎再替换运行时，成功后自动重启。
+            val app = application as DshApp
+            runCatching { app.supervisor.stop(graceMs = 3_500) }
+            try {
+                RuntimeInstaller(this).installFromIndex(
+                    entry = entry,
+                    indexUrl = runtimeIndexUrl,
+                    proxies = listOfNotNull(proxy.takeIf { it.isNotBlank() }),
+                    onProgress = { frac ->
+                        val pct = (frac * 100).toInt()
+                        runOnUiThread {
+                            tv.text = getString(R.string.about_runtime_installing, pct)
+                        }
+                    },
+                )
+                runOnUiThread {
+                    tv.text = getString(R.string.about_runtime_installed)
+                    tv.setTextColor(getColor(R.color.success))
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    tv.text = getString(
+                        R.string.about_runtime_failed,
+                        e.message ?: e.javaClass.simpleName,
+                    )
+                    tv.setTextColor(getColor(R.color.danger))
+                }
+            } finally {
+                runtimeInstalling = false
+                runCatching { app.supervisor.restart() }
+            }
+        }, "runtime-install").apply { isDaemon = true; start() }
+    }
+
+    private fun deviceAbi(): String = when (Build.SUPPORTED_ABIS.firstOrNull()) {
+        "arm64-v8a" -> "arm64-v8a"
+        "x86_64" -> "x86_64"
+        else -> Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+    }
+
+    private fun currentVersionCode(): Int = runCatching {
+        val info = packageManager.getPackageInfo(packageName, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode.toInt() else info.versionCode
+    }.getOrDefault(0)
+
+    private fun installedRuntimeVersion(): String? = runCatching {
+        val root = EngineConfig.engineRoot(this)
+        val meta = File(root, ".runtime.json")
+        if (meta.isFile) {
+            JSONObject(meta.readText()).optString("version").takeIf { it.isNotBlank() }
+        } else {
+            File(root, ".runtime-version").takeIf { it.isFile }?.readText()?.trim()
+        }
+    }.getOrNull()
 
     /** 待跳转的 Release 地址（检测到新版本后由点击触发跳转） */
     private var pendingReleaseUrl: String? = null
@@ -77,11 +207,11 @@ class AboutActivity : Activity() {
                     }
                     r.error.isNotEmpty() -> {
                         tv.text = getString(R.string.about_update_failed, r.error)
-                        tv.setTextColor(0xFF8A94A3.toInt())
+                        tv.setTextColor(getColor(R.color.text_secondary))
                     }
                     else -> {
                         tv.text = getString(R.string.about_update_latest)
-                        tv.setTextColor(0xFF81C995.toInt())
+                        tv.setTextColor(getColor(R.color.success))
                     }
                 }
             }

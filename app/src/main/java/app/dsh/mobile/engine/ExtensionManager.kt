@@ -331,6 +331,15 @@ class ExtensionManager(private val ctx: Context) {
                         )
                     }
                 } ?: emptyList(),
+                // v1.4.25（issue #47）：APK 型扩展的三个字段此前**从未被解析**——
+                // 数据类里有 apkUrl/apkSha256/apkPackage，但这里一直没赋值，于是
+                // 永远为空字符串。后果：Offline ASR / 本地识别应用这类「独立 APK」
+                // 扩展无论点多少次都走到 deb 下载路径，而它们的 packages 为空 →
+                // 抛「List is empty」（v1.4.24 起是「catalog entry … is broken」）。
+                // 用户报的正是这个：明明是有效条目，却被判成损坏。
+                apkUrl = o.optString("apkUrl", ""),
+                apkSha256 = o.optString("apkSha256", ""),
+                apkPackage = o.optString("apkPackage", ""),
             )
         }
     }

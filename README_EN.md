@@ -52,7 +52,7 @@ All figures come from real-device / emulator testing, not theory:
 | **Cold start to engine ready** | **< 10 s** | OnePlus 15T (Android 16), real device |
 | **Memory with parallel services** | **< 400 MB** | Engine + multiple toolchains running together |
 | **Android compatibility** | **8.0 → 16** | Requires WebView ≥ Chrome 85 (APIs polyfilled; Chrome 96 verified, see below) |
-| **APK size** | **~227 MB** | Full Node.js runtime + toolchain closure for 19 extensions + bundled SSH workspace plugin |
+| **APK size** | **full ~150–230 MB / lite ~25 MB** | Full bundles Node.js; the noruntime package downloads the runtime on first launch |
 | **Installed size** | **~720 MB** | Runtime unpacks to ~494 MB + the app itself |
 
 The runtime and toolchain ship in the APK, so you can start the upstream dsh engine without first setting up Termux or a proot/Ubuntu container.
@@ -72,7 +72,7 @@ The Extension Center offers **19 environment extensions** — including Python, 
 Settings → Extensions → **Community plugins** lets you search npm for dsh ecosystem plugins and install or uninstall them in the app. Compatibility-filtered results, progress, and failure reasons make plugin setup visible; installed plugins appear in the WebUI panel. **Plugins extend Agent capabilities; environment extensions provide command-line tools.**
 
 **Built-in SSH remote workspaces: edit code on a server from the phone**
-[@tiphareth/dsh-hardssh](https://github.com/tiphareth0/dsh-hardssh) ships by default. CI checks out a pinned GitHub commit at build time and compiles it into the runtime — **the plugin source does not live in this repository**. Open the **SSH workspaces** entry in the left sidebar, add a server (or import `~/.ssh/config`), and bind a remote directory as a workspace; inside that session `read` / `write` / `edit` / `bash` run **on the server**, so editing code, running tests, and reading logs stay off the phone. Local workspaces use the in-app directory browser (Android has no OS folder dialog) — DSH-styled since 0.2.10, with an inline **New folder** action — and the host form can **import or generate an SSH key** and show its public half; keys live in the app-private `.ssh` (0600) or under `Documents/dshdata/ssh`. The right-side **SSH** tab provides an xterm Web terminal, upload/download, local port-forward tunnels, and remote commands. Agent tools include `ssh_list` / `ssh_exec` / `ssh_upload` / `ssh_download` / `ssh_tunnel` / `ssh_cluster` plus `remote_ls` / `remote_search` / `remote_status`. Hosts and credentials stay in app-private storage; the engine still listens only on `127.0.0.1` and remote access is an outbound connection. Upgrade the plugin by bumping `HARDSSH_REF` in `.github/workflows/android-build.yml`. See [docs/SSH.md](docs/SSH.md).
+[@xiaopb/dsh-hardssh](https://github.com/XiaoPb/dsh-hardssh) ships by default. CI checks out a pinned GitHub commit at build time and compiles it into the runtime — **the plugin source does not live in this repository**. Open the **SSH workspaces** entry in the left sidebar, add a server (or import `~/.ssh/config`), and bind a remote directory as a workspace; inside that session `read` / `write` / `edit` / `bash` run **on the server**, so editing code, running tests, and reading logs stay off the phone. Local workspaces use the in-app directory browser (Android has no OS folder dialog) — DSH-styled since 0.2.10, with an inline **New folder** action — and the host form can **import or generate an SSH key** and show its public half; keys live in the app-private `.ssh` (0600) or under `Documents/dshdata/ssh`. The right-side **SSH** tab provides an xterm Web terminal, upload/download, local port-forward tunnels, and remote commands. Agent tools include `ssh_list` / `ssh_exec` / `ssh_upload` / `ssh_download` / `ssh_tunnel` / `ssh_cluster` plus `remote_ls` / `remote_search` / `remote_status`. Hosts and credentials stay in app-private storage; the engine still listens only on `127.0.0.1` and remote access is an outbound connection. Upgrade the plugin by bumping `HARDSSH_REF` in `.github/workflows/android-build.yml`. See [docs/SSH.md](docs/SSH.md).
 
 **Operate apps with a verified local loop**
 Enable the accessibility service and the Agent can control the phone through **21 action primitives**, including taps, text input, swipes, scrolling and search, gestures, launch/intent, repeat, conditions, and collection. Each step follows **PICK → ACT → VERIFY → RETRY**. Screen understanding layers accessibility nodes, OCR, icon recognition, and frame differences; on failure, it can change its anchor, action, or route and return the failure evidence instead of blindly repeating a tap. Conditional `when` branches, optimistic execution, and scenario memory help it handle variation and reuse successful paths.
@@ -111,14 +111,16 @@ Every capability has its own document (design trade-offs, measured numbers, trou
 | Document | What's inside |
 |---|---|
 | [Accessibility control](docs/ACCESSIBILITY.en.md) | read/tap/type/swipe/long-press/drag via 21 primitives; layered vision, per-step verification; measured ~1.45 s/step |
-| [SSH remote workspaces](docs/SSH.md) | built-in @tiphareth/dsh-hardssh: remote workspaces, web terminal, tunnels, `ssh_*` tools; built from GitHub in CI |
+| [SSH remote workspaces](docs/SSH.md) | built-in @xiaopb/dsh-hardssh: remote workspaces, web terminal, tunnels, `ssh_*` tools; built from GitHub in CI |
 | [Closed-loop design notes](docs/LOCAL_CLOSED_LOOP.md) | design and evolution of the on-device decision engine |
 | [Narrow-screen UI plugins](docs/NARROW_UI.en.md) | full-width sidebar / settings reflow / full-screen right panel (three client plugins) |
 | [LAN WebUI](docs/LAN_WEBUI.en.md) | reverse proxy, 6-digit code, persistent reminder and stop chain |
 | [Voice input](docs/VOICE_INPUT.en.md) | dual recognition channels, send de-dup, panel parking, known issue |
+| [Desktop pet overlay](docs/PET_OVERLAY.md) | reserved plugin-driven pet: bridge must be `@xiaopb/dsh-pet-bridge` >=0.3.1 (token), five-field protocol, pack import and licensing |
 | [Notifications & background](docs/NOTIFICATIONS.en.md) | AI progress, task completion, LAN reminder, clean exit |
 | [Complex-scenario field notes](docs/COMPLEX_SCENARIOS.md) | noisy pages, cross-app tasks, failure recovery, measured |
 | [Fast-path picker](docs/FAST_PATH_PICKER.md) | on-device UI element selection and discrimination |
+| [Release notes archive](docs/release-notes/) | per-release `RELEASE_NOTES_*.md` (v1.3.0+) kept out of the repo root |
 
 ## ⛔ Limits (please be aware)
 
@@ -177,24 +179,37 @@ Normal mode is the default; choose Shizuku or Root only when the task requires a
 
 ## 📦 Installation
 
-**Download a Release (recommended)**: grab the APK from [Releases](https://github.com/Soodok/Deepseek-Harness-Local-Android/releases) (pick `arm64-v8a` for phones; latest is **v1.4.17**), then install with unknown sources allowed. Any v1.0.0+ build can be installed over the top.
+**Download a Release (recommended)**: grab the APK from [Releases](https://github.com/Soodok/Deepseek-Harness-Local-Android/releases) (pick `arm64-v8a` for phones; latest is **v1.4.20**), then install with unknown sources allowed.
 
-> 📦 **Which file to pick**: normal users want **`dsh-mobile-*-arm64-v8a.apk`** (release-signed).
-> Names ending in **`-debug`** are debug-signed builds - for log capture, or for users already on a
-> debug-channel install who need a matching signature to update. Packages tagged `x86_64` are for
-> emulators only. Release and debug builds **cannot be installed over each other** (signature
-> mismatch) - switching requires uninstalling first.
+> 📦 **Which file to pick**:
+> - **Full package** (no `-noruntime` suffix): bundles the Node.js runtime (~150–230 MB), works offline.
+> - **noruntime package** (`*-noruntime.apk`): much smaller; on first launch it downloads the runtime
+>   from the link in `MANIFEST.json`. It uses the `gh-proxy.org` prefix proxy by default (direct GitHub
+>   downloads often fail in some regions); change it or switch to a direct connection under
+>   Settings → Extensions → Runtime download proxy. App updates no longer re-download the runtime.
+>
+> Both variants include the bundled SSH plugin; runtime updates are available under About → Runtime.
+> Names ending in **`-debug`** are debug-signed builds; release and debug builds cannot be installed
+> over each other. `x86_64` packages are for emulators only.
 
 **Build from source** (JDK 17 + Android SDK, NDK r26+, CMake 3.22.1):
 
 ```bash
-./scripts/collect-termux-runtime.sh app/src/main/assets/runtime.zip aarch64
-gradle assembleDebug -Pabi=arm64-v8a
+# Linux/CI: unified runtime pipeline (collect + dedupe + verify + BUILD.json)
+./scripts/build-runtime.sh --abi arm64-v8a --out dist/runtime-arm64-v8a.zip
+
+# full package
+gradle assembleDebug -Ppackage=full -PruntimeZip="$PWD/dist/runtime-arm64-v8a.zip" \
+  -PhardsshDir="$PWD/dist/hardssh"
+# noruntime package (no embedded runtime)
+gradle assembleDebug -Ppackage=noruntime -PhardsshDir="$PWD/dist/hardssh"
 ```
+
+The bundled hardssh directory is assembled by `scripts/pack-hardssh.sh` from the upstream Release tgz (npm latest by default).
 
 Alternatively, fork the repo and run the **android-build** workflow on GitHub Actions for a cloud build.
 
-**Requirements**: Android 8.0+ (**WebView ≥ Chrome 85**, see Limits) · arm64-v8a / x86_64 · **700MB+ free storage recommended** (APK ~227MB plus the ~494MB unpacked runtime).
+**Requirements**: Android 8.0+ (**WebView ≥ Chrome 85**, see Limits) · arm64-v8a / x86_64 · **1.2 GB+ free storage recommended** for a staged runtime update (full APK ~150–230 MB; runtime unpacks to ~494 MB).
 
 ## 🚀 Quick Start
 
@@ -208,13 +223,13 @@ Alternatively, fork the repo and run the **android-build** workflow on GitHub Ac
 
 **Does it require Root?** No. Normal mode covers the vast majority of use cases; Root/Shizuku are optional advanced tiers.
 
-**How does this relate to the Termux approach?** Parallel routes, not replacements. The Termux route **builds a Linux environment** on Android (manual setup / one-click script / proot + Ubuntu) and runs dsh inside it; this project **packs dsh's runtime into the APK** so you install and go, at the cost of a ~227 MB package. **Both run the same dsh** — choose by how much setup cost you're willing to pay for a live environment.
+**How does this relate to the Termux approach?** Parallel routes, not replacements. The Termux route **builds a Linux environment** on Android (manual setup / one-click script / proot + Ubuntu) and runs dsh inside it; this project **packs dsh's runtime into the APK** (full) or downloads it on first launch (noruntime), so install-and-go stays possible. **Both run the same dsh** — choose by how much setup cost you're willing to pay for a live environment.
 
 **Does it reimplement the agent itself?** No. Agent logic, plugin system, and WebUI all come from the official [`@deepseek-ai/dsh`](https://github.com/deepseek-ai/deepseek-harness); this project only provides the Android-side runtime (bionic Node.js runtime, foreground service, privilege tiers, Extension Center). That is why it is described as a **port**, not a framework.
 
 **Is my data uploaded?** The engine, sessions, and workspace are all local; whether data leaves the device depends on the model service endpoint you configure.
 
-**Why is the APK ~227MB?** It bundles the complete bionic Node.js runtime (~494MB unpacked), the toolchain closure for 19 extensions, dsh's dependency tree, and the bundled SSH workspace plugin (since v1.4.18) — the price of "no Termux required, install and go". Termux-family routes keep that setup external and installed by the user, so their package is smaller but first use requires environment setup.
+**Why is the APK so large?** The full package bundles the complete bionic Node.js runtime (~494 MB unpacked), the toolchain closure for 19 extensions, and dsh's dependency tree. Since v1.4.20 a **noruntime package** is also published: no runtime inside, app updates are tens of MB, and the runtime is downloaded on first launch and can be updated independently. Termux-family routes keep that setup external and installed by the user, so their package is smaller but first use requires environment setup.
 
 **How does the Agent show me a web page?** Ask it to start a local HTTP server and give you a `http://127.0.0.1:port` link; tap to preview.
 

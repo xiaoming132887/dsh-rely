@@ -3,6 +3,7 @@ package app.dsh.mobile
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -20,10 +21,13 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import app.dsh.mobile.engine.BootTrace
+import app.dsh.mobile.engine.RepoConfig
+import app.dsh.mobile.engine.RuntimeInstaller
 import app.dsh.mobile.engine.WebViewDownloader
 import app.dsh.mobile.engine.EngineSupervisor
 import app.dsh.mobile.engine.Privilege
 import app.dsh.mobile.service.EngineService
+import app.dsh.mobile.pet.PetOverlayService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -39,7 +43,7 @@ import kotlinx.coroutines.launch
  * 设置入口：右上角 ⋯ 跳转独立设置页（SettingsActivity，MIUI 风格分组卡片），
  * 不再使用悬浮弹窗菜单。
  */
-class MainActivity : Activity() {
+class MainActivity : ThemedActivity() {
 
     private lateinit var webView: WebView
     private lateinit var statusBar: TextView
@@ -91,6 +95,8 @@ class MainActivity : Activity() {
     private var splashStepsScroll: android.view.View? = null
     /** 阶段列表是否展开 */
     private var splashStepsExpanded = false
+    /** 当前 Activity 已应用的主题；从设置页返回时检测变化并 recreate。 */
+    private var appliedTheme: ThemeMode? = null
     /** 秒表：逐秒刷新已用时间（v1.4.8） */
     private var splashTicker: Runnable? = null
     /** 遮罩出现时间：用于保证最短展示时长（避免一闪而过） */
@@ -108,6 +114,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        appliedTheme = ThemePref.get(this)
         // 用户主动打开了 App → 清除「显式退出」标记，恢复正常保活行为。
         // 与 EngineService.exitCompletely() 的置位成对：退出后不复活，重开即恢复。
         runCatching { DshApp.setUserExitedExplicitly(this, false) }
@@ -192,8 +199,41 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * noruntime 包首启确认框：显示下载体积、建议 Wi-Fi、提供完整包入口。
+     * 只有用户点「下载并启动」才拉起引擎（进而触发运行时下载）。
+     */
+    private fun showRuntimeSetupDialog() {
+        val sizeMb = runCatching {
+            RuntimeInstaller(this).readManifest().runtime.size / (1L shl 20)
+        }.getOrDefault(0L)
+        val sizeText = if (sizeMb > 0) "$sizeMb MB" else "~130 MB"
+        AlertDialog.Builder(this)
+            .setTitle(R.string.runtime_setup_title)
+            .setMessage(getString(R.string.runtime_setup_message, sizeText))
+            .setPositiveButton(R.string.runtime_setup_download) { _, _ ->
+                EngineService.start(this)
+            }
+            .setNeutralButton(R.string.runtime_setup_full) { _, _ ->
+                runCatching {
+                    startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(RepoConfig.RELEASES_PAGE))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+            }
+            .setNegativeButton(R.string.runtime_setup_later, null)
+            .show()
+    }
+
     override fun onResume() {
         super.onResume()
+        val currentTheme = ThemePref.get(this)
+        if (appliedTheme != null && appliedTheme != currentTheme) {
+            appliedTheme = currentTheme
+            recreate()
+            return
+        }
         // 🔴 v1.2.91：恢复 WebView 的 JS 定时器。
         // 主人实测「回到后台时通过语音发送消息，消息发出去了但模型不响应，
         // 切回前台才开始响应」—— 根因就是这里缺 webView.onResume()：
@@ -212,8 +252,16 @@ class MainActivity : Activity() {
         ) {
             return   // 门禁未过：不启动引擎（引擎起了前端也渲染不了，纯粹耗电）
         }
-        // 前台进入即拉起前台服务；服务存在则幂等
-        EngineService.start(this)
+        // 前台进入即拉起前台服务；服务存在则幂等。
+        // v1.4.20：noruntime 包首启先确认下载运行时（约 130MB），不在用户不知情时
+        // 直接走蜂窝下载；确认后仍由监督器的 Installing 流程显示真实进度。
+        if (RuntimeInstaller(this).needsRuntimeDownload()) {
+            showRuntimeSetupDialog()
+        } else {
+            EngineService.start(this)
+        }
+        // 用户已开启桌宠时恢复；未授权/未开启时这里是零开销。
+        runCatching { PetOverlayService.restoreIfEnabled(this) }
         // 页面卡死看门狗（v1.2.100）：前台时才检测（后台由系统节流，探针会误判）
         startHangWatchdog()
         // 从设置页返回：语言若被改过，原地重建本页（设置页只重建了它自己，
@@ -490,20 +538,15 @@ class MainActivity : Activity() {
                 runCatching {
                     view.evaluateJavascript(CLIPBOARD_FALLBACK_JS, null)
                 }.onFailure { logWebView("clipboard bridge inject failed: ${it.message}") }
-                // v1.4.23：手机版 WebUI 二改覆盖层。社区插件把侧栏 translateX(-110%)
-                // 推出屏幕（只剩抽屉按钮），宝宝要回原来的常驻快捷栏——这里注入覆盖
-                // CSS 把它放回文档流（56px 窄栏、只显示图标），同时保留插件的底部输入
-                // 条/全屏面板/头部胶囊等优化。样式由设置页「快捷栏样式」切换。
+                // v1.4.24：社区 dsh-web-mobile 覆盖层已移除（插件本身撤掉了，改回
+                // 自有窄屏插件）。但强调色仍要传给 WebUI：部分插件读 --dsh-accent。
                 runCatching {
-                    val js = assets.open("js/shell-overrides.js")
-                        .use { it.readBytes().toString(Charsets.UTF_8) }
+                    val hex = String.format("#%06X", Accent.current(this@MainActivity).argb and 0xFFFFFF)
                     view.evaluateJavascript(
-                        "window.__dshAccent = '${String.format("#%06X", Accent.current(this@MainActivity).argb and 0xFFFFFF)}';" +
-                            "document.documentElement.style.setProperty('--dsh-accent', window.__dshAccent);" +
-                            js,
+                        "document.documentElement.style.setProperty('--dsh-accent', '$hex');",
                         null,
                     )
-                }.onFailure { logWebView("shell overrides inject failed: ${it.message}") }
+                }.onFailure { logWebView("accent var inject failed: ${it.message}") }
                 // v1.4.6：视口缩放必须在**启动遮罩收起之前**定稿，并在遮罩之下整页
                 // 重栅格化一次。旧顺序是「先 dismissSplash()、再改 meta」——用户会先看到
                 // 按 initial-scale=1 画好的首屏（含登录/开始使用弹窗），紧接着整页缩放
@@ -745,16 +788,30 @@ class MainActivity : Activity() {
         splashToggle?.setText(R.string.splash_show_steps)
         splashToggle?.setOnClickListener { toggleSplashSteps() }
         splashDetail?.text = ""
-        // 兜底：无论引擎/WebView 走哪条路径，45s 后强制收遮罩。宁可露出工具栏，
-        // 也不能让一张不透明的全屏 View 永久拦截触摸（issue #17 的教训）。
+        // 兜底：WebView 异常时强制收遮罩（issue #17）。但 noruntime 首启下载/解压
+        // 可能超过 45s —— 安装/启动期间不能收，否则用户会看到一块黑 WebView。
+        // 每 15s 续期，最多续 20 次（约 5 分钟）后仍强制收起。
         splashWatchdog?.let { v.removeCallbacks(it) }
-        val watchdog = Runnable { dismissSplash() }
+        var watchdogExtensions = 0
+        val watchdog = object : Runnable {
+            override fun run() {
+                val state = (application as DshApp).supervisor.state.value
+                val busy = state is EngineSupervisor.State.Installing ||
+                    state is EngineSupervisor.State.Starting
+                if (busy && watchdogExtensions < 20) {
+                    watchdogExtensions++
+                    v.postDelayed(this, 15_000L)
+                } else {
+                    dismissSplash()
+                }
+            }
+        }
         splashWatchdog = watchdog
         v.postDelayed(watchdog, 45_000L)
         // 秒表：每秒刷新"已用 N.Ns · 当前阶段"
         startSplashTicker()
         // WebView 底色与主题一致：遮罩淡出时不会闪出白底
-        runCatching { webView.setBackgroundColor(0xFF101418.toInt()) }
+        runCatching { webView.setBackgroundColor(getColor(R.color.bg)) }
         val logo = splashLogo ?: return
         logo.alpha = 0f
         logo.scaleX = 0.82f
@@ -863,6 +920,7 @@ class MainActivity : Activity() {
     /** 当前阶段主文案（遮罩大字） */
     private fun stageStatusRes(stage: BootTrace.Stage): Int = when (stage) {
         BootTrace.Stage.IDLE, BootTrace.Stage.PREPARING -> R.string.splash_preparing
+        BootTrace.Stage.DOWNLOADING -> R.string.splash_downloading
         BootTrace.Stage.EXTRACTING -> R.string.splash_extracting
         BootTrace.Stage.STARTING -> R.string.splash_starting
         BootTrace.Stage.LOADING -> R.string.splash_loading
@@ -884,7 +942,9 @@ class MainActivity : Activity() {
 
         val elapsed = snap.elapsedMs()
         val lastKey = snap.steps.lastOrNull()?.key
-        val label = if (snap.stage == BootTrace.Stage.EXTRACTING) {
+        val label = if (snap.stage == BootTrace.Stage.DOWNLOADING) {
+            getString(R.string.boot_step_download)
+        } else if (snap.stage == BootTrace.Stage.EXTRACTING) {
             getString(R.string.boot_step_runtime)
         } else if (lastKey != null) {
             stageLabel(lastKey)
@@ -896,14 +956,14 @@ class MainActivity : Activity() {
         // 明细行
         val detail = StringBuilder()
         val ins = snap.install
-        if (snap.stage == BootTrace.Stage.EXTRACTING) {
+        if (snap.stage == BootTrace.Stage.EXTRACTING || snap.stage == BootTrace.Stage.DOWNLOADING) {
             when {
                 // 解压文件：文件数最直观（字节数在大量小文件上几乎不动）
-                ins.totalFiles > 0 -> {
+                snap.stage == BootTrace.Stage.EXTRACTING && ins.totalFiles > 0 -> {
                     detail.append(getString(R.string.splash_files, ins.doneFiles, ins.totalFiles))
                     if (ins.doneBytes > 0) detail.append(" · ").append(fmtSize(ins.doneBytes))
                 }
-                // 拷贝 zip（assets → cache）：没有文件概念，只有字节
+                // 下载/拷贝 zip：没有文件概念，只有字节
                 ins.totalBytes > 0 -> {
                     detail.append(fmtSize(ins.doneBytes))
                         .append(" / ")
@@ -928,7 +988,11 @@ class MainActivity : Activity() {
 
         // 进度条：解压阶段用确定性进度，其余转不确定
         splashProgress?.let { p ->
-            val frac = if (snap.stage == BootTrace.Stage.EXTRACTING) ins.fraction else null
+            val frac = if (snap.stage == BootTrace.Stage.EXTRACTING || snap.stage == BootTrace.Stage.DOWNLOADING) {
+                ins.fraction
+            } else {
+                null
+            }
             if (frac == null) {
                 if (!p.isIndeterminate) {
                     p.isIndeterminate = true

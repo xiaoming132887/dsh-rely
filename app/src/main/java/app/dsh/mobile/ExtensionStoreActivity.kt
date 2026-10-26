@@ -31,7 +31,7 @@ import kotlinx.coroutines.withContext
  * 列表为程序化构建（清单约 18 项，无需引入 RecyclerView）；
  * 下载在协程 IO 线程执行，进度经 runOnUiThread 回刷行内 ProgressBar。
  */
-class ExtensionStoreActivity : Activity() {
+class ExtensionStoreActivity : ThemedActivity() {
 
     private val manager by lazy { (application as DshApp).extensionManager }
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -128,7 +128,7 @@ class ExtensionStoreActivity : Activity() {
             },
             stateText = TextView(this).apply {
                 textSize = 12f
-                setTextColor(0xFF8A94A3.toInt())
+                setTextColor(getColor(R.color.text_secondary))
             },
             action = TextView(this).apply {
                 textSize = 13f
@@ -143,7 +143,7 @@ class ExtensionStoreActivity : Activity() {
                 // 次要操作（重新安装 / 卸载）收进 ⋯ 菜单：行内只留一个主操作按钮，
                 // 把宽度让给扩展名与介绍文案（旧版 ⟳/✕ 两个文字符号按钮把描述挤没了）
                 setImageResource(R.drawable.ic_more_vert)
-                setColorFilter(0xFF8A94A3.toInt())
+                setColorFilter(getColor(R.color.text_secondary))
                 contentDescription = getString(R.string.ext_more_cd)
                 scaleType = android.widget.ImageView.ScaleType.CENTER
                 val pad = dp(6)
@@ -191,13 +191,13 @@ class ExtensionStoreActivity : Activity() {
                     addView(TextView(this@ExtensionStoreActivity).apply {
                         text = ext.name
                         textSize = 16f
-                        setTextColor(0xFFFFFFFF.toInt())
+                        setTextColor(getColor(R.color.text_primary))
                     })
                     if (ext.desc.isNotEmpty()) addView(TextView(this@ExtensionStoreActivity).apply {
                         // 介绍文案（catalog desc）：上限两行，超出省略号，不再被按钮挤成竖条
                         text = ext.desc
                         textSize = 12f
-                        setTextColor(0xFF9AA5B4.toInt())
+                        setTextColor(getColor(R.color.text_secondary))
                         maxLines = 2
                         ellipsize = android.text.TextUtils.TruncateAt.END
                         setPadding(0, dp(3), 0, 0)
@@ -273,14 +273,14 @@ class ExtensionStoreActivity : Activity() {
         val state = manager.state(ext.id)
 
         val (stateLabel, dotColor) = when {
-            downloadingNow -> getString(R.string.ext_state_installing) to COLOR_YELLOW
+            downloadingNow -> getString(R.string.ext_state_installing) to getColor(COLOR_YELLOW)
             state == ExtensionManager.ExtState.ACTIVATED ->
                 if (manager.needsRestart(ext.id))
-                    getString(R.string.ext_state_pending_restart) to COLOR_YELLOW
-                else getString(R.string.ext_state_activated) to COLOR_GREEN
+                    getString(R.string.ext_state_pending_restart) to getColor(COLOR_YELLOW)
+                else getString(R.string.ext_state_activated) to getColor(COLOR_GREEN)
             state == ExtensionManager.ExtState.DOWNLOADED ->
-                getString(R.string.ext_state_downloaded) to COLOR_YELLOW
-            else -> getString(R.string.ext_state_none) to COLOR_RED
+                getString(R.string.ext_state_downloaded) to getColor(COLOR_YELLOW)
+            else -> getString(R.string.ext_state_none) to getColor(COLOR_RED)
         }
         // 已装扩展在状态行追加实际版本（安装时从 Termux 仓库索引记录）
         val ver = if (!downloadingNow && state != ExtensionManager.ExtState.NOT_DOWNLOADED)
@@ -322,7 +322,7 @@ class ExtensionStoreActivity : Activity() {
                         styleAction(refs.action, getString(R.string.ext_action_download), accentColor(this), true)
                     }
                     ExtensionManager.ExtState.DOWNLOADED -> {
-                        styleAction(refs.action, getString(R.string.ext_action_activate), COLOR_ORANGE, true)
+                        styleAction(refs.action, getString(R.string.ext_action_activate), getColor(COLOR_ORANGE), true)
                     }
                     ExtensionManager.ExtState.ACTIVATED -> {
                         styleAction(refs.action, getString(R.string.ext_action_deactivate), 0, false)
@@ -343,7 +343,7 @@ class ExtensionStoreActivity : Activity() {
         } else {
             btn.setBackgroundResource(R.drawable.bg_btn_outline)
             btn.backgroundTintList = null
-            btn.setTextColor(0xFFB0BAC7.toInt())
+            btn.setTextColor(getColor(R.color.text_secondary))
         }
     }
 
@@ -438,7 +438,7 @@ class ExtensionStoreActivity : Activity() {
                     .apply { marginStart = dp(4); marginEnd = dp(4) }
             }
         addView(tool(getString(R.string.ext_tool_check), accentColor(this@ExtensionStoreActivity), true) { runHealthCheck() })
-        addView(tool(getString(R.string.ext_tool_install_all), COLOR_ORANGE, true) { installAllMissing() })
+        addView(tool(getString(R.string.ext_tool_install_all), getColor(COLOR_ORANGE), true) { installAllMissing() })
         addView(tool(getString(R.string.ext_tool_repair), 0, false) { repairBroken() })
     }.also { toolsBar = it }
 
@@ -566,20 +566,21 @@ class ExtensionStoreActivity : Activity() {
     // ================= 杂项 =================
 
     private fun categoryColor(category: String): Int = when (category) {
-        "Language runtimes", "语言运行时" -> 0xFF6EE7B7.toInt()
-        "Build & tooling", "编译构建" -> 0xFFFFB74D.toInt()
-        else -> 0xFFA78BFA.toInt()
+        "Language runtimes", "语言运行时" -> getColor(R.color.success)
+        "Build & tooling", "编译构建" -> getColor(R.color.warning)
+        else -> getColor(R.color.accent_alt)
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     private companion object {
-        val COLOR_RED = 0xFFFF5A5F.toInt()
-        val COLOR_YELLOW = 0xFFFFB74D.toInt()
-        val COLOR_GREEN = 0xFF6EE7B7.toInt()
+        // 徽章/按钮用色改为主题资源引用（companion 存 resId，实例侧 getColor 解析）
+        val COLOR_RED = R.color.danger
+        val COLOR_YELLOW = R.color.warning
+        val COLOR_GREEN = R.color.success
         /** 强调色（v1.4.23 起随配色方案变化，故不能在 companion 里固化） */
         fun accentColor(ctx: android.content.Context): Int = Accent.current(ctx).argb
-        val COLOR_ORANGE = 0xFFFFB74D.toInt()
+        val COLOR_ORANGE = R.color.warning
 
         /** 平板/横屏下列表内容最大宽度（dp） */
         const val STORE_CONTENT_MAX_WIDTH_DP = 900

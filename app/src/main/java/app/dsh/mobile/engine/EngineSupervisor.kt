@@ -233,6 +233,22 @@ class EngineSupervisor(private val ctx: Context) {
     }
 
     /** 重启互斥：重复点击重启按钮是 no-op（并发 stop/start 会互相踩踏，实测事故） */
+    /**
+     * 凭证/登录类失败的特征串（v1.4.24）。命中即判定「重启无用」，
+     * 直接引导用户重新登录，而不是反复重启。
+     */
+    private val AUTH_FAILURE_MARKERS = listOf(
+        "401", "403", "unauthorized", "authentication failed", "authentication required",
+        "invalid api key", "invalid_api_key", "incorrect api key",
+        "token expired", "invalid token", "token is invalid",
+        // 中文特征串用 Unicode 转义：这里是日志匹配模式（不是 UI 文案），
+        // i18n 门禁会禁止 Kotlin 里出现 CJK 字面量。
+        "token \u8fc7\u671f", "\u4ee4\u724c\u5df2\u8fc7\u671f",
+        "login required", "not logged in",
+        "\u8bf7\u5148\u767b\u5f55", "\u767b\u5f55\u5df2\u5931\u6548",
+        "credentials", "assertowneronly", "eacces",
+    )
+
     @Volatile private var restarting = false
     /** 用户重启的起点时间戳（healthy 时打印总耗时，用于定位「重启很久」这类反馈） */
     @Volatile private var restartStartedAt: Long? = null
@@ -356,6 +372,36 @@ class EngineSupervisor(private val ctx: Context) {
         }.getOrDefault("")
         return "$status:${tail.hashCode()}"
     }
+
+    /**
+     * 本次启动是否因**凭证/登录态**失败（v1.4.24）。
+     *
+     * 用户反馈：「token 过期就会显示进程异常退出、反复重启」。这类失败的特征是
+     * 重启无法自愈——需要用户重新登录 / 换 API Key / 修正凭据文件权限。如果
+     * 交给常规退避重试，就是「重启 14 次全部失败 → Failed」的长时间空转，
+     * 用户只看到「进程异常退出」却不知道要重新登录。
+     *
+     * 判据（任一命中）：
+     *  - 401 / 403 / unauthorized / invalid api key / authentication failed
+     *  - token expired / invalid token / 登录失效
+     *  - credentials 读取失败（权限/格式）
+     *
+     * 只扫**本次启动**的日志段（[logOffsetAtSpawn] 之后），避免把历史错误当成本次。
+     */
+    private fun looksLikeAuthFailure(): Boolean = runCatching {
+        val f = logFile()
+        if (!f.isFile) return@runCatching false
+        val len = f.length()
+        val from = logOffsetAtSpawn.coerceIn(0L, len)
+        if (len <= from) return@runCatching false
+        val text = java.io.RandomAccessFile(f, "r").use { raf ->
+            raf.seek(from)
+            val buf = ByteArray((len - from).toInt().coerceAtMost(16_384))
+            val n = raf.read(buf)
+            String(buf, 0, n.coerceAtLeast(0), Charsets.UTF_8)
+        }.lowercase()
+        AUTH_FAILURE_MARKERS.any { text.contains(it) }
+    }.getOrElse { false }
 
     /**
      * **本次启动**的日志尾部是否出现「端口被占」类失败。
@@ -521,6 +567,13 @@ class EngineSupervisor(private val ctx: Context) {
                 _installProgress.value = null
                 step("runtime-install")
 
+                // v1.4.20：内置 SSH 插件与 runtime 解耦。runtime 重装会删掉
+                // engine/lib，插件必须在这里补装（失败只降级 SSH，不阻断引擎）。
+                runCatching { HardsshInstaller(ctx).ensureInstalled() }
+                    .onSuccess { v -> if (v != null) Log.i(TAG, "bundled ssh plugin ready: $v") }
+                    .onFailure { Log.w(TAG, "bundled ssh plugin setup failed: ${it.message}") }
+                step("hardssh-install")
+
                 // 用户数据外置（v1.2.99）：sessions/workspaces 迁到公开目录（软链），
                 // profiles 保持私有（上游强制凭证 0600，共享存储给不了权限位）。
                 // 必须在 spawn 前完成 —— 引擎启动即读这些目录。
@@ -638,6 +691,9 @@ class EngineSupervisor(private val ctx: Context) {
                         _state.value =
                             if (safe) State.SafeMode(EngineConfig.DEFAULT_PORT, tokenUrl, notice)
                             else State.Healthy(EngineConfig.DEFAULT_PORT, tokenUrl, notice)
+                        // 新运行时首次 Healthy：确认安装成功，释放 engine.old 回滚备份。
+                        runCatching { RuntimeInstaller(ctx).markHealthy() }
+                            .onFailure { Log.w(TAG, "runtime markHealthy failed: ${it.message}") }
                         // 启动记录收尾：引擎已可用。WebView 首屏耗时会由 UI 层补记。
                         BootTrace.ready(ctx)
                         // ⚠️ v1.4.9：成功进入 Healthy/SafeMode 后**重置墙钟起点与插件
@@ -666,6 +722,16 @@ class EngineSupervisor(private val ctx: Context) {
                                     "exitCode=${(status shr 8) and 0xff})",
                             )
                         }
+                        // ── v1.4.24（宝宝要求）：异常退出后彻底清场再完整重启 ──────
+                        // 这条路径是「引擎健康运行过、然后被杀/OOM/崩溃」——正是用户
+                        // 说的「进程异常退出」。旧实现直接进入下一轮 spawn，残留的
+                        // 监听 socket、TIME_WAIT、或被 su 拉起的孙进程都可能让新引擎
+                        // EADDRINUSE，表现为「反复重启起不来」。
+                        //
+                        // 现在：先按端口把 3080 上的一切清干净，再完整重新启动一遍，
+                        // 效果等同「关掉应用重开」。
+                        withContext(Dispatchers.IO) { reclaimPort() }
+                        Log.i(TAG, "post-crash: port ${EngineConfig.DEFAULT_PORT} thoroughly reclaimed before restart")
                         // v1.4.16（审查 P1）：健康运行的引擎退出、即将自动重启时，
                         // 重置启动墙钟——新一轮「用户可见启动」从旧引擎死亡时起算。
                         // 旧实现只有 Healthy 分支一个重置点，健康跑超 5 分钟后崩溃，
@@ -731,6 +797,35 @@ class EngineSupervisor(private val ctx: Context) {
             // deterministicFailure 恒为 null，且日志无端口冲突 → 不触发）。
             // ⚠️ 阻塞调用（socket 探测 / Thread.sleep / su）必须切到 IO：
             // 监督循环本身跑在 Dispatchers.Default 上。
+            // ── v1.4.24：异常退出 → 无条件彻底清场 ────────────────────────────
+            // 宝宝要求：「异常退出时把当前 3080 端口的所有东西全部杀掉，然后重新
+            // 完整启动一遍 dsh web，相当于把应用关了重开」。
+            //
+            // 旧实现只在「端口探测显示被占」时才清场，且只杀 cmdline 匹配
+            // files/engine/bin/node 的进程。问题是：进程退出≠端口释放（内核
+            // TIME_WAIT / 僵尸孙进程 / su 外壳仍持有 fd），而且包装层会改变
+            // cmdline 让匹配失效。结果就是「引擎明明死了，下一轮启动还是
+            // EADDRINUSE」的诡异循环。
+            //
+            // 现在：只要本次是**异常退出**（deterministicFailure != null 说明
+            // 启动期自己死了，或日志确证端口冲突），就先做一次彻底清场，
+            // 再进入正常退避重试。清场对空闲端口是无害 no-op，代价只是几百毫秒。
+            val crashed = deterministicFailure != null || looksLikePortConflict()
+            // ── v1.4.24：凭证/token 类失败 → 不无限重启 ──────────────────────
+            // 用户反馈「token 过期就显示进程异常退出、反复重启」。这类失败
+            // 重启多少次都不会好（需要用户重新登录或换 key），必须收敛成
+            // 一个可操作的提示，否则就是永动机式的重启风暴。
+            if (crashed && looksLikeAuthFailure()) {
+                Log.e(TAG, "auth/credential failure detected — retrying cannot help, asking user to re-authenticate")
+                val msg = ctx.getString(R.string.error_auth_expired)
+                _state.value = State.Failed(msg)
+                BootTrace.fail(ctx, msg)
+                return
+            }
+            if (crashed) {
+                withContext(Dispatchers.IO) { reclaimPort() }
+                Log.i(TAG, "crash detected — thorough port reclaim done, next attempt starts clean")
+            }
             val portEvidence = withContext(Dispatchers.IO) {
                 portInUse() && (deterministicFailure != null || looksLikePortConflict())
             }
@@ -870,7 +965,7 @@ class EngineSupervisor(private val ctx: Context) {
         // v1.2.159：启动前自愈 engine/bin 的 Termux shebang（真机 37 个 wrapper 指向不存在的
         // 路径 → getprop/logcat/node 直接崩）。幂等，仅改第一行。
         runCatching { EngineConfig.healTermuxShebangs(ctx) }
-        // 内置 SSH 远程工作区（@tiphareth/dsh-hardssh）：插件随 runtime.zip 发布，
+        // 内置 SSH 远程工作区（@xiaopb/dsh-hardssh）：插件随 runtime.zip 发布，
         // 这里补 profile 模块链接并取回它自己的 patch 层。顺序必须保持：
         //   ① 插件层：禁用 fs-sandbox/subprocess、插入 hardssh 接缝行
         //   ② Android 适配层：重复钉住关键 host 行（后应用者生效）
@@ -962,6 +1057,81 @@ class EngineSupervisor(private val ctx: Context) {
      * `files/engine/bin/node`，误杀会让「局域网访问」在每次引擎重启后静默失效。
      */
     private fun reclaimPort() {
+        // v1.4.24：默认也改为「按端口找占用者」——旧实现只匹配 cmdline 含
+        // files/engine/bin/node 的进程，任何包装层（sh -c、su 外壳、自定义启动器）
+        // 都可能漏网，导致「杀了但端口还在占」的假清场。
+        reclaimPortByPort()
+    }
+
+    /**
+     * 彻底清场（v1.4.24，宝宝要求）：
+     * 「把当前 3080 端口的所有东西全部杀掉，然后重新完整启动一遍 dsh web，
+     *  相当于把应用关了重开」。
+     *
+     * 与 [reclaimPort] 的区别：**不按 cmdline 匹配，直接按端口找持有者**。
+     * 因此无论是引擎 node、su 外壳、僵尸孙进程，还是任何第三方进程占着 3080，
+     * 都会被清掉。这是异常退出后的默认处置，不再只在「检测到端口占用」时触发。
+     *
+     * 安全边界：只针对**监听 3080 的进程**，绝不误伤 LAN 反向代理（它监听别的
+     * 端口；即便 cmdline 含 engine node，只要不占 3080 就不动）。
+     */
+    private fun reclaimPortByPort() {
+        val port = EngineConfig.DEFAULT_PORT
+        Log.w(TAG, "port $port — thorough reclaim (kill every holder of this port)")
+        val d = "$"
+        // 用 /proc 找所有监听该端口的 uid（tcp/tcp6 的本地地址:端口列），再杀掉这些 pid。
+        // 匹配逻辑：读 /proc/net/tcp{,6}，找 state=0A（LISTEN）且 local_port == 3080，
+        // 取其 inode，再扫 /proc/<pid>/fd 找指向 socket:[inode] 的进程。
+        val script = """
+            PORT_HEX=${'$'}(printf '%04X' $port)
+            INODES=''
+            for f in /proc/net/tcp /proc/net/tcp6; do
+              [ -r "${'$'}f" ] || continue
+              INODES="${'$'}INODES ${'$'}(awk -v p="${'$'}PORT_HEX" 'NR>1 && \$4 == "0A" { split(\$2,a,":"); if (a[2]==p) print \$10 }' "${'$'}f" 2>/dev/null)"
+            done
+            case "${'$'}INODES" in
+              *[0-9]*)
+                for p in ${'$'}(ls /proc | grep -E '^[0-9]+${'$'}'); do
+                  for fd in /proc/${'$'}p/fd/*; do
+                    tgt=${'$'}(readlink "${'$'}fd" 2>/dev/null) || continue
+                    case "${'$'}tgt" in
+                      socket:*)
+                        ino=${'$'}{tgt#socket:}
+                        ino=${'$'}{ino%]}
+                        case " ${'$'}INODES " in
+                          *" ${'$'}ino "*) kill -9 ${'$'}p 2>/dev/null; break ;;
+                        esac ;;
+                    esac
+                  done
+                done ;;
+            esac
+            true
+        """.trimIndent()
+        // ① 同 uid
+        runCatching {
+            val p = ProcessBuilder("/system/bin/sh", "-c", script).start()
+            if (!p.waitFor(4, java.util.concurrent.TimeUnit.SECONDS)) {
+                runCatching { p.destroy() }
+                Log.w(TAG, "thorough reclaim: same-uid sweep timed out (4s)")
+            }
+        }
+        // ② su 兜底（Root 模式孤儿以 uid 0 运行，app uid 杀不动）
+        Privilege.runSu(script)
+        waitPortFree(2_000)
+        if (portInUse(400)) {
+            Log.w(TAG, "port still in use after thorough sweep — retrying via su")
+            Privilege.runSu(script)
+            waitPortFree(2_000)
+        }
+        if (portInUse(300)) {
+            Log.e(TAG, "port $port STILL in use after thorough sweeps — next boot will likely fail")
+        } else {
+            Log.i(TAG, "port $port is free after thorough reclaim")
+        }
+    }
+
+    /** 旧口径：只杀 cmdline 含 files/engine/bin/node 的进程（保留给 LAN 代理等场景） */
+    private fun reclaimEngineNodesOnly() {
         Log.w(TAG, "port ${EngineConfig.DEFAULT_PORT} in use — reclaiming (orphan engine node)")
         // ① 先按端口精确 kill（能覆盖 cmdline 不是 node 的占位进程）
         pidListeningOn3080()?.takeIf { it > 1 }?.let { pid ->

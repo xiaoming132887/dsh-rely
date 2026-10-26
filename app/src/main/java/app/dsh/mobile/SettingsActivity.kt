@@ -1,6 +1,5 @@
 package app.dsh.mobile
 
-import android.app.Activity
 import android.app.AlertDialog
 import android.Manifest
 import android.content.Intent
@@ -9,8 +8,10 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
@@ -21,9 +22,13 @@ import app.dsh.mobile.engine.ChatRecovery
 import app.dsh.mobile.engine.ExtensionManager
 import app.dsh.mobile.engine.PrivMode
 import app.dsh.mobile.engine.Privilege
+import app.dsh.mobile.engine.RuntimeDownloadConfig
 import app.dsh.mobile.engine.SelfCheck
 import app.dsh.mobile.engine.TtsManager
 import app.dsh.mobile.engine.LanWebProxy
+import app.dsh.mobile.pet.PetOverlayService
+import app.dsh.mobile.pet.PetPluginDetector
+import app.dsh.mobile.pet.PetSettingsActivity
 
 /**
  * 独立设置页（MIUI 分组卡片风格，替代原先的悬浮菜单）。
@@ -36,7 +41,7 @@ import app.dsh.mobile.engine.LanWebProxy
  * 权限切换与缩放均复用 MainActivity 的既有决策（Root 双警告、缩放 −/＋ 步进、
  * 无障碍跳系统设置），落库到同一组 SharedPreferences，MainActivity 在 onResume 重新读取生效。
  */
-class SettingsActivity : Activity() {
+class SettingsActivity : ThemedActivity() {
 
     /** 屏幕朝向偏好（v1.2.120 三态） */
     private var orientMode: OrientationMode = OrientationMode.PORTRAIT
@@ -147,6 +152,14 @@ class SettingsActivity : Activity() {
             }
         }
 
+        // —— 扩展：运行时下载代理（v1.4.21）——
+        // 运行时 zip / 签名索引都从 GitHub Releases 取；国内直连经常超时。
+        // 默认 gh-proxy.org，可换自建前缀，留空则直连。
+        refreshRuntimeProxyRow()
+        findViewById<LinearLayout>(R.id.rowRuntimeProxy).setOnClickListener {
+            showRuntimeProxyDialog()
+        }
+
         // —— 顶部返回 ——
         findViewById<ImageView>(R.id.btnBack).setOnClickListener { finish() }
 
@@ -159,6 +172,14 @@ class SettingsActivity : Activity() {
         findViewById<LinearLayout>(R.id.rowScale).setOnClickListener {
             showScaleDialog()
         }
+
+        // —— 显示：外观主题（深色/浅色/跟随系统）——
+        // 与引导页写同一份偏好（ThemePref）；改动后本页 recreate 立即生效，
+        // 返回主界面时 MainActivity.onResume 检测到偏好变化会自行重建。
+        findViewById<LinearLayout>(R.id.rowTheme)?.setOnClickListener {
+            showThemeDialog()
+        }
+        findViewById<TextView>(R.id.valTheme)?.text = getString(ThemePref.get(this).labelRes)
 
         // —— 显示：配色方案（v1.4.23）——
         // v1.4.22 把 DSHA 靛蓝写死了，宝宝反馈"跟主题不搭"。配色不再拍板，
@@ -256,6 +277,11 @@ class SettingsActivity : Activity() {
         // —— 社区插件（v1.2.113）：一键安装 dsh 生态插件 ——
         findViewById<LinearLayout>(R.id.rowPlugin).setOnClickListener {
             startActivity(Intent(this, PluginStoreActivity::class.java))
+        }
+
+        // —— 桌宠悬浮窗（预留，插件驱动）：独立设置页负责权限/包/开关 ——
+        findViewById<LinearLayout>(R.id.rowPet).setOnClickListener {
+            startActivity(Intent(this, PetSettingsActivity::class.java))
         }
 
         // 自定义指令（v1.3.2，issue #19）：在 App 的环境说明之上补写用户自己的长期指令。
@@ -648,7 +674,7 @@ class SettingsActivity : Activity() {
             it.text = getString(
                 if (rootOk) R.string.setting_root_status_yes else R.string.setting_root_status_no
             )
-            it.setTextColor(if (rootOk) 0xFF6EE7B7.toInt() else 0xFF8A94A3.toInt())
+            it.setTextColor(if (rootOk) getColor(R.color.success) else getColor(R.color.text_secondary))
         }
         refreshShizuku()
         refreshAccess()
@@ -657,7 +683,36 @@ class SettingsActivity : Activity() {
         refreshNotifRow()
         refreshMicRow()
         refreshExt()
+        refreshPetRow()
         // 缩放副标题文案无需变；图标着色按打开时状态由静态 XML 决定
+    }
+
+    /** 扩展分组：桌宠入口状态（未装桥插件 / 已就绪 / 运行中 / 缺权限）。 */
+    private fun refreshPetRow() {
+        val v = findViewById<TextView>(R.id.valPet)
+        val plugin = PetPluginDetector.detect(this)
+        val running = PetOverlayService.isRunning()
+        val canDraw = Settings.canDrawOverlays(this)
+        val status = app.dsh.mobile.pet.PetStatusBus.state.value
+        val text = when {
+            !canDraw -> getString(R.string.pet_permission_denied)
+            running && status.connected -> getString(R.string.pet_status_connected)
+            running -> getString(R.string.pet_status_running)
+            !plugin.profileExists -> getString(R.string.pet_status_engine_down)
+            // 装了但低于 0.3.1：不能报「未安装」，否则用户会重复装同一个旧版
+            plugin.bridgeInstalled && !plugin.bridgeVersionOk ->
+                getString(R.string.pet_status_plugin_outdated)
+            !plugin.bridgeReady -> getString(R.string.pet_plugin_missing)
+            else -> getString(R.string.pet_status_stopped)
+        }
+        v.text = text
+        v.setTextColor(
+            when {
+                running -> getColor(R.color.success)
+                !canDraw || !plugin.bridgeReady -> getColor(R.color.warning)
+                else -> getColor(R.color.text_secondary)
+            },
+        )
     }
 
     /** 扩展中心入口：显示已激活扩展数（>0 变绿提示已并入引擎） */
@@ -665,7 +720,7 @@ class SettingsActivity : Activity() {
         val count = ExtensionManager(this).activeCount()
         val v = findViewById<TextView>(R.id.valExt)
         v.text = getString(R.string.setting_ext_active_count, count)
-        v.setTextColor(if (count > 0) 0xFF6EE7B7.toInt() else 0xFF8A94A3.toInt())
+        v.setTextColor(if (count > 0) getColor(R.color.success) else getColor(R.color.text_secondary))
     }
 
     /** 权限中心：所有文件访问状态（MANAGE_EXTERNAL_STORAGE，Android 11+ 系统设置页授予；
@@ -677,7 +732,7 @@ class SettingsActivity : Activity() {
             android.content.pm.PackageManager.PERMISSION_GRANTED
         val v = findViewById<TextView>(R.id.valStorage)
         v.text = getString(if (granted) R.string.storage_granted else R.string.storage_denied)
-        v.setTextColor(if (granted) 0xFF6EE7B7.toInt() else 0xFFFFB74D.toInt())
+        v.setTextColor(if (granted) getColor(R.color.success) else getColor(R.color.warning))
     }
 
     /** 权限中心：TTS 引擎可用性（列出 TextToSpeechService 提供方，不触发绑定） */
@@ -685,7 +740,7 @@ class SettingsActivity : Activity() {
         val n = TtsManager.engineCount(this)
         val v = findViewById<TextView>(R.id.valTts)
         v.text = if (n == 0) getString(R.string.tts_missing) else getString(R.string.tts_engines, n)
-        v.setTextColor(if (n > 0) 0xFF6EE7B7.toInt() else 0xFF8A94A3.toInt())
+        v.setTextColor(if (n > 0) getColor(R.color.success) else getColor(R.color.text_secondary))
     }
 
     /** 权限中心：通知权限（Android 13+ 运行时授权；低版本默认持有） */
@@ -697,7 +752,7 @@ class SettingsActivity : Activity() {
         else true
         val v = findViewById<TextView>(R.id.valNotif)
         v.text = getString(if (granted) R.string.notif_granted else R.string.notif_denied)
-        v.setTextColor(if (granted) 0xFF6EE7B7.toInt() else 0xFF8A94A3.toInt())
+        v.setTextColor(if (granted) getColor(R.color.success) else getColor(R.color.text_secondary))
     }
 
     /** 麦克风权限是否已授予（语音输入的前提） */
@@ -710,7 +765,7 @@ class SettingsActivity : Activity() {
         val granted = hasMicPermission()
         val v = findViewById<TextView>(R.id.valMic)
         v.text = getString(if (granted) R.string.mic_granted else R.string.mic_denied)
-        v.setTextColor(if (granted) 0xFF6EE7B7.toInt() else 0xFF8A94A3.toInt())
+        v.setTextColor(if (granted) getColor(R.color.success) else getColor(R.color.text_secondary))
     }
 
     /** 权限回调：麦克风授权结果 → 刷新状态行 */
@@ -739,13 +794,13 @@ class SettingsActivity : Activity() {
         when {
             Privilege.shizukuUsable() -> {
                 v.text = getString(R.string.setting_shizuku_granted)
-                v.setTextColor(0xFF6EE7B7.toInt())
+                v.setTextColor(getColor(R.color.success))
             }
             Privilege.shizukuServerRunning() -> {
                 // v1.2.158 隐私修复：这里**不再**自动请求（拒绝后回调又会回到此处 →
                 // 死循环弹窗）。改为展示状态 + 允许点击该行**显式**重新申请。
                 v.text = getString(R.string.setting_shizuku_request)
-                v.setTextColor(0xFFFFB74D.toInt())
+                v.setTextColor(getColor(R.color.warning))
                 v.isClickable = true
                 v.setOnClickListener {
                     Privilege.requestShizukuPermission(SHIZUKU_REQ, this@SettingsActivity, explicit = true)
@@ -753,7 +808,7 @@ class SettingsActivity : Activity() {
             }
             else -> {
                 v.text = getString(R.string.setting_shizuku_absent)
-                v.setTextColor(0xFF8A94A3.toInt())
+                v.setTextColor(getColor(R.color.text_secondary))
             }
         }
     }
@@ -767,7 +822,7 @@ class SettingsActivity : Activity() {
         findViewById<TextView>(R.id.valAccess).text =
             getString(if (on) R.string.state_on else R.string.state_off)
         findViewById<TextView>(R.id.valAccess).setTextColor(
-            if (on) 0xFF6EE7B7.toInt() else 0xFF8A94A3.toInt()
+            if (on) getColor(R.color.success) else getColor(R.color.text_secondary)
         )
     }
 
@@ -818,6 +873,87 @@ class SettingsActivity : Activity() {
             .showStyled()
     }
 
+    // ================= 扩展：运行时下载代理 =================
+
+    /** 刷新「运行时下载代理」行的说明文字（默认 / 自定义 / 直连）。 */
+    private fun refreshRuntimeProxyRow() {
+        val sub = findViewById<TextView>(R.id.subRuntimeProxy)
+        val current = RuntimeDownloadConfig.proxy(this)
+        sub.text = when {
+            current.isBlank() -> getString(R.string.setting_runtime_proxy_value_direct)
+            RuntimeDownloadConfig.isDefault(this) ||
+                current.equals(RuntimeDownloadConfig.DEFAULT_PROXY.trimEnd('/'), ignoreCase = true) ->
+                getString(R.string.setting_runtime_proxy_value_default)
+            else -> getString(R.string.setting_runtime_proxy_value_custom, current)
+        }
+    }
+
+    /**
+     * 运行时下载代理编辑框（v1.4.21）。
+     *
+     * 运行时 zip 与签名索引都从 GitHub Releases 取；默认 gh-proxy.org，
+     * 国内网络不用先等一轮直连超时。用户可换自建镜像，或留空直连。
+     */
+    private fun showRuntimeProxyDialog() {
+        val current = RuntimeDownloadConfig.proxy(this)
+        val input = EditText(this).apply {
+            setText(current)
+            hint = RuntimeDownloadConfig.DEFAULT_PROXY
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine()
+            setSelection(text.length)
+        }
+        val tip = TextView(this).apply {
+            text = getString(
+                R.string.setting_runtime_proxy_dialog_hint,
+                RuntimeDownloadConfig.DEFAULT_PROXY,
+            )
+            textSize = 12f
+            setTextColor(getColor(R.color.text_secondary))
+            setPadding(0, dp(8), 0, 0)
+            setLineSpacing(dp(2).toFloat(), 1f)
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(12), dp(24), dp(4))
+            addView(input)
+            addView(tip)
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.setting_runtime_proxy)
+            .setView(box)
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.setting_runtime_proxy_reset, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawableResource(R.drawable.bg_dialog_rounded)
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val raw = input.text.toString()
+                if (!RuntimeDownloadConfig.isValid(raw)) {
+                    input.error = getString(R.string.setting_runtime_proxy_invalid)
+                    return@setOnClickListener
+                }
+                RuntimeDownloadConfig.setProxy(this, raw)
+                refreshRuntimeProxyRow()
+                Toast.makeText(
+                    this, getString(R.string.setting_runtime_proxy_saved), Toast.LENGTH_SHORT,
+                ).show()
+                dialog.dismiss()
+            }
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                RuntimeDownloadConfig.setProxy(this, null)
+                refreshRuntimeProxyRow()
+                Toast.makeText(
+                    this, getString(R.string.setting_runtime_proxy_reset_done), Toast.LENGTH_SHORT,
+                ).show()
+                dialog.dismiss()
+            }
+        }
+        dialog.show()
+    }
     // ================= 显示：页面缩放 =================
 
     /**
@@ -900,12 +1036,12 @@ class SettingsActivity : Activity() {
                 addView(TextView(this@SettingsActivity).apply {
                     text = label
                     textSize = 16f
-                    setTextColor(0xFFFFFFFF.toInt())
+                    setTextColor(getColor(R.color.text_primary))
                 })
                 if (sub.isNotEmpty()) addView(TextView(this@SettingsActivity).apply {
                     text = sub
                     textSize = 12f
-                    setTextColor(0xFF8A94A3.toInt())
+                    setTextColor(getColor(R.color.text_secondary))
                 })
             }
             return LinearLayout(this).apply {
@@ -1069,6 +1205,29 @@ class SettingsActivity : Activity() {
     // ───────────────────────────────────────────────────────────────────
     // v1.4.23：配色方案 / 布局样式 / 快捷栏样式
     // ───────────────────────────────────────────────────────────────────
+
+    /**
+     * 外观主题：深色 / 浅色 / 跟随系统。
+     *
+     * 落库到 `ThemePref`（SharedPreferences `dsh_ui.theme_mode`），与引导页共用。
+     * 选完必须 `recreate()`：`ThemeManager.wrap()` 在 `attachBaseContext` 阶段
+     * 改 `uiMode`，只有重建 Activity 才会重新取 values / values-night 资源。
+     * 主界面不用管——`MainActivity.onResume` 会比对 `appliedTheme` 并自行重建。
+     */
+    private fun showThemeDialog() {
+        val modes = ThemeMode.entries
+        val labels = modes.map { getString(it.labelRes) }.toTypedArray()
+        val checked = modes.indexOf(ThemePref.get(this))
+        android.app.AlertDialog.Builder(this)
+            .setTitle(R.string.setting_theme)
+            .setSingleChoiceItems(labels, checked) { d, which ->
+                ThemePref.set(this, modes[which])
+                d.dismiss()
+                recreate()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
 
     /** 配色方案选择：5 种强调色，默认项目原本的天蓝 */
     private fun showAccentDialog() {
@@ -1293,24 +1452,6 @@ class SettingsActivity : Activity() {
                 else -> Unit
             }
         }
-    }
-
-    /** 快捷栏样式：常驻窄栏 / 滑动抽屉（写入 WebView 的 localStorage） */
-    private fun showSidebarStyleDialog() {
-        val prefs = getSharedPreferences("dsh_web_prefs", MODE_PRIVATE)
-        val current = prefs.getString("sidebar_style", "rail") ?: "rail"
-        val labels = arrayOf(getString(R.string.sidebar_rail), getString(R.string.sidebar_drawer))
-        val idx = if (current == "drawer") 1 else 0
-        android.app.AlertDialog.Builder(this)
-            .setTitle(R.string.sidebar_style)
-            .setSingleChoiceItems(labels, idx) { d, which ->
-                val style = if (which == 1) "drawer" else "rail"
-                prefs.edit().putString("sidebar_style", style).apply()
-                d.dismiss()
-                android.widget.Toast.makeText(this, R.string.sidebar_style, android.widget.Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
     }
 
 }

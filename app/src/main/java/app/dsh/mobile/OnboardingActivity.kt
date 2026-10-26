@@ -1,6 +1,5 @@
 package app.dsh.mobile
 
-import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
@@ -24,11 +23,12 @@ import app.dsh.mobile.engine.Privilege
  * 进入 Root 分支前）会先对 dsh-home 做 tar 备份可回滚。能力检测仅 stat/probe，
  * 不做任何危险动作。
  */
-class OnboardingActivity : Activity() {
+class OnboardingActivity : ThemedActivity() {
 
     private var selectedOrientation: OrientationMode = OrientationMode.PORTRAIT
     private var selectedPriv = PrivMode.NORMAL
     private var selectedLang = LocaleHelper.DEFAULT
+    private var selectedTheme: ThemeMode = ThemeMode.DARK
 
     /** Shizuku 授权结果监听（requestPermission 异步回调） */
     private val shizukuPermListener =
@@ -50,9 +50,17 @@ class OnboardingActivity : Activity() {
         rikka.shizuku.Shizuku.addRequestPermissionResultListener(shizukuPermListener)
 
         // v1.4.18：平板默认选中「自动」，手机仍默认竖屏（与 OrientationPrefs 同一默认值）
-        selectedOrientation = OrientationPrefs.defaultFor(this)
+        selectedOrientation = savedInstanceState?.getString(KEY_ORIENTATION)
+            ?.let { runCatching { OrientationMode.valueOf(it) }.getOrNull() }
+            ?: OrientationPrefs.defaultFor(this)
+        selectedPriv = savedInstanceState?.getString(KEY_PRIV)
+            ?.let { runCatching { PrivMode.valueOf(it) }.getOrNull() }
+            ?: PrivMode.NORMAL
         // 默认选中：普通 + 语言卡片高亮（默认英语）
         selectedLang = LocaleHelper.get(this)
+        // 外观主题：优先取本次重建前保存的选择，其次读已落库偏好（默认深色）
+        selectedTheme = savedInstanceState?.getString(KEY_THEME)?.let { ThemeMode.fromKey(it) }
+            ?: ThemePref.get(this)
         updateSelectionUi()
 
         // 语言卡片组（v1.2.120：en/de/zh 三选一）：点击保存偏好并 recreate，立即切换引导页语言
@@ -66,6 +74,22 @@ class OnboardingActivity : Activity() {
                 if (selectedLang != code) {
                     LocaleHelper.set(this, code)
                     selectedLang = code
+                    recreate()
+                }
+            }
+        }
+
+        // 外观主题三卡（v1.4.24 修复：此前卡片仅存在于布局，点击无任何效果）：
+        // 写偏好后 recreate，本页立即按新主题重绘；方向/权限选择由 onSaveInstanceState 保留。
+        for ((cardId, mode) in listOf(
+            R.id.cardThemeDark to ThemeMode.DARK,
+            R.id.cardThemeLight to ThemeMode.LIGHT,
+            R.id.cardThemeSystem to ThemeMode.SYSTEM,
+        )) {
+            findViewById<LinearLayout>(cardId).setOnClickListener {
+                if (selectedTheme != mode) {
+                    ThemePref.set(this, mode)
+                    selectedTheme = mode
                     recreate()
                 }
             }
@@ -93,7 +117,13 @@ class OnboardingActivity : Activity() {
             }
             if (selectedPriv == PrivMode.SHIZUKU) maybeRequestShizuku()
         }
-        privGroup.check(R.id.privNormal)
+        privGroup.check(
+            when (selectedPriv) {
+                PrivMode.ROOT -> R.id.privRoot
+                PrivMode.SHIZUKU -> R.id.privShizuku
+                else -> R.id.privNormal
+            },
+        )
 
         // 能力检测（Root 用 su 实测；Shizuku 用官方 binder ping + 授权态）
         //
@@ -137,6 +167,13 @@ class OnboardingActivity : Activity() {
             selectedPriv = PrivMode.NORMAL
             findViewById<RadioGroup>(R.id.privGroup).check(R.id.privNormal)
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(KEY_ORIENTATION, selectedOrientation.name)
+        outState.putString(KEY_PRIV, selectedPriv.name)
+        outState.putString(KEY_THEME, selectedTheme.key)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onDestroy() {
@@ -188,17 +225,22 @@ class OnboardingActivity : Activity() {
 
     private companion object {
         const val SHIZUKU_REQ = 4201
+        const val KEY_ORIENTATION = "ob_orientation"
+        const val KEY_PRIV = "ob_priv"
+        const val KEY_THEME = "ob_theme"
     }
 
     /**
      * 卡片选中态（v1.2.120）：
      *  - 方向三卡（竖屏/横屏/自动）：选中卡文字高亮 + 不透明，未选中变暗；
      *  - 语言三卡（en/de/zh）：同样高亮当前语言（此前无语言选中态，
-     *    默认英语时用户看不出当前选的是哪个）。
+     *    默认英语时用户看不出当前选的是哪个）；
+     *  - 主题三卡（v1.4.24）：高亮当前主题，选中即写偏好并重建本页。
      */
     private fun updateSelectionUi() {
         val highlight = app.dsh.mobile.Accent.current(applicationContext).argb
-        val normal = 0xFF9CA3AF.toInt()
+        // 未选中态用主题的次要文字色：深色 #9CA3AF、浅色 #475569，两套都有足够对比度
+        val normal = getColor(R.color.text_secondary)
 
         // —— 方向：竖屏/横屏/自动 ——
         val orientCards = listOf(
@@ -234,6 +276,17 @@ class OnboardingActivity : Activity() {
             val active = selectedLang == code
             txt.setTextColor(if (active) highlight else normal)
             card.alpha = if (active) 1f else 0.6f
+        }
+
+        // —— 主题：深色/浅色/跟随系统 ——
+        for ((cardId, txtId, mode) in listOf(
+                Triple(R.id.cardThemeDark, R.id.txtThemeDark, ThemeMode.DARK),
+                Triple(R.id.cardThemeLight, R.id.txtThemeLight, ThemeMode.LIGHT),
+                Triple(R.id.cardThemeSystem, R.id.txtThemeSystem, ThemeMode.SYSTEM),
+            )) {
+            val active = selectedTheme == mode
+            findViewById<TextView>(txtId).setTextColor(if (active) highlight else normal)
+            findViewById<LinearLayout>(cardId).alpha = if (active) 1f else 0.6f
         }
     }
 
@@ -297,6 +350,9 @@ class OnboardingActivity : Activity() {
 
         // 落库语言偏好（进主界面后按新语言显示）
         LocaleHelper.set(this, selectedLang)
+
+        // 落库外观主题（点击时已写入；这里兜一次底，保证「没点过」也留下明确偏好）
+        ThemePref.set(this, selectedTheme)
 
         // 落库横竖屏偏好（v1.2.120：三态 portrait/landscape/auto）。朝向由 MainActivity
         // 在 onCreate 里 applyOrientation() 统一应用。

@@ -3,21 +3,23 @@ package app.dsh.mobile.engine
 import app.dsh.mobile.R
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
 /**
  * Node 运行时安装器。
  *
- * 两条安装路径（优先级从高到低）：
- *  1. assets/runtime.zip —— CI 构建时注入的离线包（推荐，无网络依赖）
- *  2. MANIFEST.json 声明的远程 URL —— 开发期热更新，强制 SHA-256 校验
+ * 两种包形态（由构建期 MANIFEST 的 `package` 决定）：
+ *  - `full`：assets/runtime.zip 随 APK 分发，离线安装；
+ *  - `noruntime`：APK 不含运行时，按 MANIFEST 的 `runtime.urls` 下载（强制 SHA-256）。
+ *
+ * 版本语义（v1.4.20）：
+ *  - full 包：包内 runtime 版本比已安装的新 → 本地重装（不下载）；
+ *  - noruntime 包：**已装好就复用**，绝不因 App 升级重下运行时；更新走显式云更新。
  *
  * 安装 = 解压到 filesDir/engine + 恢复可执行位。
  * zip 不保存 Unix 权限，因此解压后对 bin/ 下所有文件 chmod 755；
@@ -25,90 +27,303 @@ import java.util.zip.ZipInputStream
  */
 class RuntimeInstaller(private val ctx: Context) {
 
-    data class Manifest(val version: String, val url: String?, val sha256: String?)
+    data class RuntimeInfo(
+        val version: String,
+        val builtAt: Long,
+        val bundled: Boolean,
+        val url: String?,
+        val urls: List<String>,
+        val sha256: String?,
+        val size: Long,
+        val unpackedBytes: Long,
+    )
+
+    data class Manifest(
+        val packageName: String,
+        val abi: String,
+        val runtime: RuntimeInfo,
+        val indexUrl: String?,
+        val proxies: List<String>,
+    )
+
+    private data class Installed(
+        val version: String,
+        val builtAt: Long,
+        val source: String,
+    )
+
     private val root get() = EngineConfig.engineRoot(ctx)
     private val stampFile get() = File(root, ".runtime-version")
+    private val metaFile get() = File(root, ".runtime.json")
 
     fun readManifest(): Manifest {
         val raw = ctx.assets.open("runtime/MANIFEST.json").bufferedReader().use { it.readText() }
         val obj = JSONObject(raw)
-        return Manifest(
-            version = obj.getString("version"),
-            url = obj.optString("url").takeIf { it.isNotEmpty() },
-            sha256 = obj.optString("sha256").takeIf { it.isNotEmpty() },
+        val rt = obj.optJSONObject("runtime")
+        val legacy = rt == null
+        val urls = mutableListOf<String>()
+        if (rt != null) {
+            rt.optJSONArray("urls")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val u = arr.optString(i)
+                    if (u.isNotBlank() && u !in urls) urls.add(u)
+                }
+            }
+            rt.optString("url").takeIf { it.isNotBlank() }?.let { if (it !in urls) urls.add(0, it) }
+        } else {
+            obj.optString("url").takeIf { it.isNotBlank() }?.let { urls.add(it) }
+        }
+        val runtime = RuntimeInfo(
+            version = if (legacy) obj.optString("version", "unknown") else rt!!.optString("version", "unknown"),
+            builtAt = if (legacy) 0L else rt!!.optLong("builtAt", 0L),
+            bundled = if (legacy) hasAsset("runtime.zip") else rt!!.optBoolean("bundled", false),
+            url = if (legacy) obj.optString("url").takeIf { it.isNotBlank() } else rt!!.optString("url").takeIf { it.isNotBlank() },
+            urls = urls,
+            sha256 = (if (legacy) obj.optString("sha256") else rt!!.optString("sha256")).takeIf { it.isNotBlank() },
+            size = if (legacy) 0L else rt!!.optLong("size", 0L),
+            unpackedBytes = if (legacy) 0L else rt!!.optLong("unpackedBytes", 0L),
         )
+        val packageName = obj.optString("package").ifBlank { if (runtime.bundled) "full" else "noruntime" }
+        val updates = obj.optJSONObject("updates")
+        val indexUrl = updates?.optString("indexUrl")?.takeIf { it.isNotBlank() }
+        val proxies = mutableListOf<String>()
+        updates?.optJSONArray("proxies")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val p = arr.optString(i)
+                if (p.isNotBlank()) proxies.add(p)
+            }
+        }
+        return Manifest(packageName, obj.optString("abi"), runtime, indexUrl, proxies)
     }
 
-    /** 确保运行时就绪；已安装且版本匹配且关键资产完整则跳过。
+    /** 确保运行时就绪；已安装且关键资产完整时按包形态决定是否复用。
      *  @param onProgress 解压进度 0f..1f（仅解压阶段有值；频繁调用方自行节流）
      *  @param onDetail 解压的文件数/字节数明细（v1.4.8：启动遮罩显示"已加载 N/M 个文件"）
      *
-     *  m1.13 完整性校验：m1.12 事故实锤——覆盖升级后 @deepseek-ai 目录只剩空壳
-     *  （JS 文件未落地）但 .runtime-version 已写成功，「engine 存在+版本匹配」即跳装
-     *  → MODULE_NOT_FOUND 反复重启。故改为【版本匹配 + 关键资产存在】双重条件，
-     *  任一关键资产缺失即视为安装不完整，删除重装。
-     *
-     *  @return true = 复用了已安装的运行时（本次没有解压）；false = 执行了解压 */
+     *  @return true = 复用了已安装的运行时（本次没有解压）；false = 执行了解压/下载 */
     fun ensureInstalled(
         onProgress: (Float) -> Unit = {},
         onDetail: (BootTrace.Install) -> Unit = {},
+    ): Boolean = synchronized(INSTALL_LOCK) {
+        ensureInstalledLocked(onProgress, onDetail)
+    }
+
+    private fun ensureInstalledLocked(
+        onProgress: (Float) -> Unit,
+        onDetail: (BootTrace.Install) -> Unit,
     ): Boolean {
+        recoverPendingHealth()
         val manifest = readManifest()
-        // ⚠️ v1.3.1：读版本戳**可能抛 EACCES**（属性被改坏：权限位被剥 / 属主变成 root
-        // ——用户反馈的「异常退出后无法使用，删掉重装才好」正是这条）。旧实现让它一路
-        // 抛到监督器 → 每轮启动都失败、退避到 Failed。
-        // 现在把「读不了」等价于「版本不匹配」：走重装路径（install 内部会先做属性自愈）。
-        val stampOk = runCatching {
-            stampFile.exists() && stampFile.readText().trim() == manifest.version
-        }.getOrElse { e ->
-            Log.w(TAG, "runtime stamp unreadable (${e.javaClass.simpleName}: ${e.message}) — treating as stale")
-            false
-        }
-        if (EngineConfig.nodeBin(ctx).exists() && stampOk && isRootComplete()) {
-            Log.i(TAG, "runtime ${manifest.version} already installed (assets verified)")
-            return true
-        }
-        if (isRootComplete()) {
-            // 版本变了才重装，属正常升级
+        val complete = EngineConfig.nodeBin(ctx).exists() && isRootComplete()
+        if (complete) {
+            val installed = readInstalled()
+            val reuse = when {
+                // 简单包：只要运行时完整就复用；运行时更新只能显式触发。
+                manifest.packageName == "noruntime" -> true
+                // 完整包：包内版本更新时本地重装（无下载）。
+                !manifest.runtime.bundled -> true
+                // 已通过云端更新到比包内更新的运行时：不要被旧 APK 降级。
+                installed != null && installed.builtAt > 0 &&
+                    manifest.runtime.builtAt > 0 &&
+                    installed.builtAt > manifest.runtime.builtAt -> true
+                manifest.runtime.version.isBlank() || manifest.runtime.version == "unknown" -> true
+                installed != null -> installed.version == manifest.runtime.version
+                else -> runCatching { stampFile.readText().trim() == manifest.runtime.version }
+                    .getOrDefault(false)
+            }
+            if (reuse) {
+                if (installed == null) writeStamp(manifest.runtime, bundled = manifest.runtime.bundled)
+                Log.i(TAG, "runtime ${manifest.runtime.version} already installed (${manifest.packageName})")
+                return true
+            }
+            Log.i(
+                TAG,
+                "runtime upgrade in package: installed=${installed?.version ?: "?"} " +
+                    "bundled=${manifest.runtime.version}; reinstalling locally",
+            )
         } else {
-            Log.w(TAG, "runtime install incomplete (missing assets); forcing reinstall")
+            Log.w(TAG, "runtime install incomplete (missing assets); installing")
         }
         install(manifest, onProgress, onDetail)
         return false
     }
 
     /**
-     * 完整性探针：校验最容易被部分解压吞掉的【引擎入口 JS】与【关键动态库】存在。
-     * 只查「必须存在」的锚点文件，避免与运行时裁剪的解耦（不校验具体数量）。
-     * @return true 表示本次安装是完整的
+     * noruntime 包且本机还没有完整运行时 → 首启需要先征得用户同意再下载。
+     * 只读探针，不触发安装。
      */
-    private fun isRootComplete(): Boolean {
+    fun needsRuntimeDownload(): Boolean = runCatching {
+        val manifest = readManifest()
+        manifest.packageName == "noruntime" &&
+            !(EngineConfig.nodeBin(ctx).exists() && isRootComplete())
+    }.getOrDefault(false)
+
+    /**
+     * 引擎进入 Healthy/SafeMode 后调用：确认新运行时可用，删除 engine.old 与 pending 标记。
+     * 幂等；没有待确认安装时是 no-op。
+     */
+    fun markHealthy() {
+        val marker = pendingMarker()
+        val backup = backupDir()
+        if (!marker.isFile && !backup.exists()) return
+        runCatching {
+            if (backup.exists() && !backup.deleteRecursively()) {
+                Log.w(TAG, "could not remove runtime backup ${backup.absolutePath}")
+            }
+            marker.delete()
+            metaBackupFile().delete()
+            stampBackupFile().delete()
+        }.onFailure { Log.w(TAG, "markHealthy cleanup failed: ${it.message}") }
+        Log.i(TAG, "runtime confirmed healthy; previous runtime backup released")
+    }
+
+    /**
+     * 启动时处理“上次换运行时后从未确认 Healthy”的情况。
+     *
+     * 两次启动都未进入 Healthy（或当前 runtimes 不完整）→ 回滚 engine.old；
+     * 第一次未确认只累加计数，避免用户强杀 App 造成误回滚。
+     */
+    private fun recoverPendingHealth() {
+        val marker = pendingMarker()
+        val backup = backupDir()
+        if (!marker.isFile) return
+        if (!backup.isDirectory || backup.listFiles().isNullOrEmpty()) {
+            marker.delete()
+            return
+        }
+        val attempts = (runCatching { marker.readText().trim().toInt() }.getOrNull() ?: 0) + 1
+        val currentOk = isRootComplete()
+        if (currentOk && attempts < 2) {
+            marker.writeText(attempts.toString())
+            Log.w(TAG, "runtime pending-health (attempt $attempts); keeping new runtime for one more boot")
+            return
+        }
+        Log.w(TAG, "runtime pending-health failed (attempts=$attempts, complete=$currentOk); rolling back")
+        runCatching {
+            backup.listFiles()?.forEach { old ->
+                val current = File(root, old.name)
+                current.deleteRecursively()
+                if (!old.renameTo(current)) old.copyRecursively(current, overwrite = true)
+            }
+            restoreMetaBackups()
+            marker.delete()
+            backup.deleteRecursively()
+            Log.w(TAG, "runtime rolled back to previous version after failed boot")
+        }.onFailure {
+            Log.e(TAG, "runtime rollback failed: ${it.javaClass.simpleName}: ${it.message}")
+        }
+    }
+
+    private fun pendingMarker() = File(ctx.filesDir, ".pending-health")
+    private fun backupDir() = File(ctx.filesDir, "engine.old")
+    private fun metaBackupFile() = File(ctx.filesDir, ".runtime.json.old")
+    private fun stampBackupFile() = File(ctx.filesDir, ".runtime-version.old")
+
+    private fun backupMeta() {
+        runCatching {
+            if (metaFile.isFile) metaFile.copyTo(metaBackupFile(), overwrite = true) else metaBackupFile().delete()
+            if (stampFile.isFile) stampFile.copyTo(stampBackupFile(), overwrite = true) else stampBackupFile().delete()
+        }.onFailure { Log.w(TAG, "runtime metadata backup failed: ${it.message}") }
+    }
+
+    private fun restoreMetaBackups() {
+        runCatching {
+            if (metaBackupFile().isFile) metaBackupFile().copyTo(metaFile, overwrite = true)
+            if (stampBackupFile().isFile) stampBackupFile().copyTo(stampFile, overwrite = true)
+        }.onFailure { Log.w(TAG, "runtime metadata restore failed: ${it.message}") }
+        metaBackupFile().delete()
+        stampBackupFile().delete()
+    }
+
+    /**
+     * 显式安装云端索引里的运行时（设置/关于页“检查运行时更新”）。
+     * 与首启安装走同一条 staging 流程；调用方需在后台线程执行。
+     *
+     * v1.4.21：不再用 `check(!installing)` 抛 “runtime install already in progress”。
+     * 那个布尔量是**进程级**的，引擎启动时的自动安装也会置位 —— 用户在启动安装
+     * 期间点更新、或连点两次更新，就会直接撞上这条英文异常。现在改为串行等待：
+     * 同一时刻只有一个安装真正落盘，后到的请求排队而不是报错。
+     */
+    fun installFromIndex(
+        entry: RuntimeIndexClient.Entry,
+        indexUrl: String?,
+        proxies: List<String>,
+        onProgress: (Float) -> Unit = {},
+        onDetail: (BootTrace.Install) -> Unit = {},
+    ): String = synchronized(INSTALL_LOCK) {
+        val info = RuntimeInfo(
+            version = entry.version,
+            builtAt = entry.builtAt,
+            bundled = false,
+            url = entry.urls.firstOrNull(),
+            urls = entry.urls,
+            sha256 = entry.sha256,
+            size = entry.size,
+            unpackedBytes = entry.unpackedBytes,
+        )
+        val manifest = Manifest("noruntime", defaultAbi(), info, indexUrl, proxies)
+        install(manifest, onProgress, onDetail)
+        entry.version
+    }
+
+    /** 读安装元数据（.runtime.json），旧安装回退到纯文本版戳。 */
+    private fun readInstalled(): Installed? = runCatching {
+        if (metaFile.isFile) {
+            val obj = JSONObject(metaFile.readText())
+            return@runCatching Installed(
+                version = obj.optString("version"),
+                builtAt = obj.optLong("builtAt", 0L),
+                source = obj.optString("source"),
+            )
+        }
+        if (stampFile.isFile) {
+            return@runCatching Installed(stampFile.readText().trim(), 0L, "legacy")
+        }
+        null
+    }.getOrElse { e ->
+        Log.w(TAG, "runtime metadata unreadable (${e.javaClass.simpleName}: ${e.message})")
+        null
+    }
+
+    private fun hasAsset(path: String): Boolean = runCatching {
+        ctx.assets.open(path).close()
+        true
+    }.getOrDefault(false)
+
+    /** 设备主 ABI（manifest 里通常已有，legacy 包兜底）。 */
+    private fun defaultAbi(): String = when (Build.SUPPORTED_ABIS.firstOrNull()) {
+        "arm64-v8a" -> "arm64-v8a"
+        "x86_64" -> "x86_64"
+        else -> Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+    }
+
+    private fun currentVersionCode(): Int = runCatching {
+        val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode.toInt() else info.versionCode
+    }.getOrDefault(0)
+
+    private fun isRootComplete(): Boolean = isRootCompleteAt(root)
+
+    /**
+     * 完整性探针（可对任意目录，用于 staging 校验）。
+     * 只查「必须存在」的锚点文件，避免与运行时裁剪的解耦（不校验具体数量）。
+     */
+    private fun isRootCompleteAt(base: File): Boolean {
+        val node = File(base, "bin/node")
         // 1) 引擎入口 bin.js（MODULE_NOT_FOUND 的直接案发现场）
-        if (!EngineConfig.dshEntry(ctx).isFile) return false
+        if (!File(base, "lib/node_modules/@deepseek-ai/dsh/lib/bin.js").isFile) return false
         // 2) bash 依赖闭环：readline SONAME 别名（m1.5 事故）
-        val lib = File(root, "lib")
-        if (!File(lib, "libreadline.so.8").isFile) return false
+        if (!File(base, "lib/libreadline.so.8").isFile) return false
         // 3) node 本体可执行位（安装器 restoreExecBits 之后应为 true）
-        if (!EngineConfig.nodeBin(ctx).canExecute()) return false
-        // 4) @deepseek-ai 作用域下锚点文件存在（空壳=部分解压）
-        //
-        // ⚠️ v1.4.4 性能修复（用户实测手表启动 12s → 40s）：
-        // 此前用 `walkTopDown().filter{isFile}.count() < 100` 判「不是空壳」。
-        // 引擎 0.2.1 改成逐包嵌套依赖后，`@deepseek-ai` 下文件从 2,093 涨到
-        // **33,620**，而这段代码**每次启动**都要把整棵树走一遍。Android 上
-        // stat/readdir 很贵（实测 5k 目录需 3.2s），阈值只有 100 却付了 3 万文件的代价 ——
-        // 这是「每次启动变慢」最确定的单一来源。
-        //
-        // 改为固定锚点抽样：覆盖入口包、核心框架、内置 profile 层与前端 bundle，
-        // 任一处缺失即判不完整（宁可多装一次，也不让坏安装走快路径）。
-        val dshAi = File(root, "lib/node_modules/@deepseek-ai")
+        if (!node.canExecute()) return false
+        // 4) @deepseek-ai 固定锚点抽样（覆盖入口包、核心框架、内置 profile 层与前端 bundle）
+        val dshAi = File(base, "lib/node_modules/@deepseek-ai")
         val anchors = listOf(
-            "dsh/lib/bin.js",                     // 引擎入口
-            "dsh/package.json",                   // 包元数据
-            "cordis/lib/index.js",                // 核心框架（所有插件依赖）
-            "dsh-base/cordis.patch.yml",          // 内置 profile 层
-            "dsh-web-app/cordis.patch.yml",       // web profile 层
-            "dsh-client-ui-chat/lib/client.js",   // 浏览器端主 bundle
+            "dsh/package.json",
+            "cordis/lib/index.js",
+            "dsh-base/cordis.patch.yml",
+            "dsh-web-app/cordis.patch.yml",
+            "dsh-client-ui-chat/lib/client.js",
         )
         for (rel in anchors) {
             if (!File(dshAi, rel).isFile) {
@@ -116,18 +331,10 @@ class RuntimeInstaller(private val ctx: Context) {
                 return false
             }
         }
-        // 5) **架构必须匹配**（v1.3.3，issue #23）
-        //
-        // 前四项都通过、但 node 是另一个 CPU 架构的二进制时，会发生最坏的情况：
-        //   · 文件在、可执行位在 → 探针判「安装完整」→ 写入版本戳 → 永远走快路径
-        //   · 真正的失败发生在 execve：linker 直接拒绝跨架构 ELF
-        //     （`EXEC format error`，exit=1，Android 没有 binfmt/qemu 用户态模拟）
-        //   · 于是每轮启动都是「已安装 → 启动 → 立刻死」的确定循环，**永不自我修复**
-        //     只能清数据/重装 —— 对用户就是「装完就是坏的」。
-        // 所以架构是完整性的一部分，不是附加检查。
+        // 5) 架构必须匹配（跨架构 ELF 会在 execve 被 linker 拒绝）
         val want = expectedElfMachine()
         if (want > 0) {
-            val got = elfMachine(EngineConfig.nodeBin(ctx))
+            val got = elfMachine(node)
             if (got != want) {
                 Log.e(TAG, "runtime node architecture mismatch: e_machine=$got, device expects $want")
                 return false
@@ -142,15 +349,11 @@ class RuntimeInstaller(private val ctx: Context) {
     private val EM_AARCH64 = 183
 
     /** 本机主 ABI 对应的 e_machine；无法判定返回 -1（此时跳过校验，不误伤） */
-    private fun expectedElfMachine(): Int {
-        for (abi in android.os.Build.SUPPORTED_ABIS) {
-            when (abi) {
-                "arm64-v8a" -> return EM_AARCH64
-                "x86_64" -> return EM_X86_64
-                "armeabi-v7a", "armeabi" -> return EM_ARM
-            }
-        }
-        return -1
+    private fun expectedElfMachine(): Int = when (Build.SUPPORTED_ABIS.firstOrNull()) {
+        "arm64-v8a" -> EM_AARCH64
+        "x86_64" -> EM_X86_64
+        "armeabi-v7a", "armeabi" -> EM_ARM
+        else -> -1
     }
 
     /** 读 ELF 头的 e_machine；读不到 / 不是 ELF 返回 -1 */
@@ -251,49 +454,98 @@ class RuntimeInstaller(private val ctx: Context) {
         }
     }
 
+    /**
+     * 真正的下载 + 解压 + 换名。
+     *
+     * ⚠️ 调用方必须持有 [INSTALL_LOCK]（[ensureInstalled] / [installFromIndex]
+     * 已经代劳），否则会和另一个安装同时写 `engine/`。
+     */
     private fun install(
         manifest: Manifest,
         onProgress: (Float) -> Unit,
         onDetail: (BootTrace.Install) -> Unit = {},
     ) {
-        Log.i(TAG, "installing runtime ${manifest.version}")
+        val info = manifest.runtime
+        Log.i(TAG, "installing runtime ${info.version} (${manifest.packageName})")
         installing = true
         try {
             val assetZip = File(ctx.cacheDir, "runtime.zip")
-            try {
-                // 【v1.2.97】空间预检（用户邮件反馈：覆盖升级后引擎反复崩溃重启）。
-                // 覆盖升级 = 旧 runtime（~450MB）还在盘上 + zip 缓存（~170MB）+ 新解压
-                // （~450MB）峰值同卷并存，空间紧张的设备解压半途 ENOSPC → 部分文件
-                // 落地 → isRootComplete 探针失败 → 删了再装 → 更紧 → **无限崩溃重启**，
-                // 而"回滚旧版"因旧 runtime 已装好且版本匹配（跳过重装）反而不受影响。
-                // 与其让用户看玄学退避，不如一开始就给出明确错误。
-                fun mb(v: Long) = v / (1L shl 20)
-                fun requireFree(needMb: Long) {
-                    val usable = root.usableSpace
-                    check(usable >= needMb * (1L shl 20)) {
-                        ctx.getString(
-                            R.string.error_runtime_no_space,
-                            needMb, mb(usable),
-                        )
+            assetZip.delete()
+            // 【v1.2.97】空间预检（用户邮件反馈：覆盖升级后引擎反复崩溃重启）。
+            // 覆盖升级 = 旧 runtime 还在盘上 + zip 缓存 + 新解压峰值同卷并存。
+            fun mb(v: Long) = v / (1L shl 20)
+            fun requireFree(needMb: Long) {
+                val usable = root.usableSpace
+                check(usable >= needMb * (1L shl 20)) {
+                    ctx.getString(R.string.error_runtime_no_space, needMb, mb(usable))
+                }
+            }
+
+            val bundled = info.bundled && hasAsset("runtime.zip")
+            val unpackMb = if (info.unpackedBytes > 0) mb(info.unpackedBytes) else 500
+            if (bundled) {
+                // v1.4.20 staging：旧 runtime + engine.staging + zip 峰值
+                requireFree(unpackMb * 2 + 300)
+                copyAssetWithProgress(assetZip, onDetail)
+                requireFree(unpackMb * 2 + mb(assetZip.length()) + 200)
+            } else {
+                val abi = manifest.abi.ifBlank { defaultAbi() }
+                // v1.4.21：代理来自用户偏好（默认 gh-proxy.org），不再只信 MANIFEST。
+                // MANIFEST 保留直连地址作为兜底，代理地址由这里统一生成并排到最前。
+                val proxy = RuntimeDownloadConfig.proxy(ctx)
+                var urls = info.urls.ifEmpty { listOfNotNull(info.url) }
+                var pinned = info.sha256?.takeIf { it.isNotBlank() }
+                var expectedSize = info.size
+                if (pinned == null) {
+                    // edge/preview 的 manifest 指向滚动 latest URL，构建时没有 sha；
+                    // 先从签名索引取 sha，验签失败/不可达则拒绝下载（不降级）。
+                    val entry = RuntimeIndexClient.resolve(
+                        ctx = ctx,
+                        indexUrl = manifest.indexUrl,
+                        proxyBase = proxy,
+                        abi = abi,
+                        exactVersion = info.version,
+                        currentVersionCode = currentVersionCode(),
+                    )
+                    if (entry != null) {
+                        pinned = entry.sha256
+                        if (expectedSize <= 0) expectedSize = entry.size
+                        urls = (urls + entry.urls).distinct()
                     }
                 }
-                requireFree(600)   // 覆盖升级峰值：旧 runtime + zip 缓存 + 新解压并存
-                // v1.4.8：assets → cache 的拷贝本身就要几十秒（240MB，实测模拟器
-                // 38s），而旧实现这段时间里 UI 完全没有进度可显示 —— 用户看到的
-                // 是"卡在准备运行环境"一动不动。这里按字节上报，遮罩能显示真实 MB。
-                copyAssetWithProgress(assetZip, onDetail)
-                // 解压前再校验一次：此时 zip 真实大小已知
-                requireFree(assetZip.length() / (1L shl 20) + 400)
-            } catch (e: Exception) {
-                // 路径 2：远程下载（必须带 SHA-256）
-                val url = manifest.url ?: throw IllegalStateException(
-                    ctx.getString(R.string.error_runtime_no_source), e,
-                )
-                downloadTo(url, assetZip)
-                manifest.sha256?.let { expected ->
-                    val actual = sha256(assetZip)
-                    check(actual.equals(expected, ignoreCase = true)) {
-                        "Runtime checksum mismatch: expected=$expected actual=$actual"
+                // 用户显式留空（直连）时，把 MANIFEST/索引里预置的镜像地址剔掉；
+                // 若剔完没有可用直连地址，则保留原列表兜底（至少还能下载）。
+                val blockedProxies = if (proxy.isBlank()) {
+                    (manifest.proxies + RuntimeDownloadConfig.DEFAULT_PROXY).distinct()
+                } else {
+                    emptyList()
+                }
+                urls = RuntimeDownloadConfig.orderUrls(urls, proxy, blockedProxies)
+                if (urls.isEmpty()) {
+                    throw IllegalStateException(ctx.getString(R.string.error_runtime_no_source))
+                }
+                val expected = pinned
+                    ?: throw IllegalStateException(
+                        "Runtime download has no SHA-256 pin (signed runtime-index unavailable)",
+                    )
+                requireFree(unpackMb * 2 + mb(expectedSize) + 300)
+                Log.i(TAG, "downloading runtime ${info.version} from $urls")
+                BootTrace.stage(BootTrace.Stage.DOWNLOADING)
+                onProgress(0f)
+                HttpDownloader(ctx).download(urls, assetZip, expected, expectedSize) { frac ->
+                    // 下载占进度条前 45%，解压占后 55%，避免进度条回到 0 再走一遍。
+                    onProgress(frac * 0.45f)
+                    if (expectedSize > 0) {
+                        runCatching {
+                            onDetail(
+                                BootTrace.Install(
+                                    doneFiles = 0,
+                                    totalFiles = 0,
+                                    doneBytes = (expectedSize * frac).toLong(),
+                                    totalBytes = expectedSize,
+                                ),
+                            )
+                        }
                     }
                 }
             }
@@ -301,60 +553,110 @@ class RuntimeInstaller(private val ctx: Context) {
             // v1.3.3（issue #23）：解压前断言架构。必须在**删除旧 runtime 之前**做 ——
             // 否则发现架构不对时旧环境已经被拆了，用户从「启动失败」退化成「什么都没了」。
             assertAssetArch(assetZip)
+            BootTrace.stage(BootTrace.Stage.EXTRACTING)
 
-            // v1.2.21 事故修复：原 root.deleteRecursively() 会把 engine/ 整个删光，
-            // extensions/（用户下载的全家扩展）一起陪葬；且删除 70MB 目录耗时较长，
-            // 与用户点扩展下载并发 → 刚发布的扩展目录被删到只剩 lib → rename 报
-            // 「扩展目录发布失败」。现在按 zip 实际顶层目录（bin/etc/lib/share/usr）
-            // 精确替换，extensions/ 等用户资产永不触碰。
-            root.mkdirs()
-            val topDirs = java.util.zip.ZipFile(assetZip).use { zf ->
-                zf.entries().asSequence()
-                    .map { it.name.substringBefore('/') }
-                    .filter { it.isNotEmpty() }
-                    .toSet()
-            }
-            // ⚠️ v1.3.1：删除旧 runtime 前先确保**删得掉**。
-            // Root 引擎（uid 0）在 engine/ 下写过的文件属主是 root，App 删不掉 →
-            // deleteRecursively 静默留下残余 → 新文件覆盖写入 EACCES → 每次启动都重装失败
-            // （用户报的「异常退出后无法使用，删掉重装才好」）。这里在删除前先走一次
-            // 属性自愈（chown + chmod + restorecon，Shizuku/su 通道），失败也不阻断
-            // ——只是把「注定失败」变成「大概率成功」。
+            // v1.2.21 事故修复：绝不 root.deleteRecursively()（会把 extensions/ 一起删）。
+            // v1.4.20：先解压到 engine.staging，校验通过后再逐个顶层条目换名；
+            // 任何一步失败都从 engine.old 回滚，旧运行时保持可用。
+            val staging = File(ctx.filesDir, "engine.staging")
+            val backup = File(ctx.filesDir, "engine.old")
+            staging.deleteRecursively()
+            backup.deleteRecursively()
+            pendingMarker().delete()
+            backupMeta()
+            staging.mkdirs()
             runCatching {
                 if (Privilege.dshHomeNeedsOwnershipFix(ctx)) {
                     Log.w(TAG, "runtime reinstall: healing file attributes before wipe")
                     Privilege.fixHomeOwnership(ctx)
                 }
             }
-            topDirs.forEach { top ->
-                val victim = File(root, top)
-                if (!victim.deleteRecursively() && victim.exists()) {
-                    // 删不干净必须留痕：否则只在下一轮 unzip 失败时暴露，原因已丢失
-                    Log.w(TAG, "runtime reinstall: could not fully remove ${victim.absolutePath}")
-                }
+
+            unzip(
+                assetZip,
+                staging,
+                onProgress = { p -> onProgress(if (bundled) p else 0.45f + p * 0.55f) },
+                onDetail = onDetail,
+            )
+            restoreExecBits(staging)
+            check(isRootCompleteAt(staging)) {
+                "staged runtime incomplete (${staging.absolutePath})"
             }
 
-            unzip(assetZip, root, onProgress, onDetail)
-            restoreExecBits(root)
-            stampFile.writeText(manifest.version)
+            root.mkdirs()
+            val entries = staging.listFiles()?.toList().orEmpty()
+            check(entries.isNotEmpty()) { "staging is empty" }
+            val swapped = mutableListOf<String>()
+            try {
+                for (entry in entries) {
+                    val name = entry.name
+                    val current = File(root, name)
+                    if (current.exists()) {
+                        val old = File(backup, name)
+                        old.parentFile?.mkdirs()
+                        if (!current.renameTo(old)) {
+                            current.copyRecursively(old, overwrite = true)
+                            if (!current.deleteRecursively()) {
+                                throw java.io.IOException("cannot move ${current.absolutePath}")
+                            }
+                        }
+                    }
+                    swapped.add(name)
+                    if (!entry.renameTo(current)) {
+                        entry.copyRecursively(current, overwrite = true)
+                        if (!entry.deleteRecursively()) {
+                            throw java.io.IOException("cannot place ${current.absolutePath}")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "runtime swap failed; rolling back from ${backup.absolutePath}", e)
+                for (name in swapped.asReversed()) {
+                    val current = File(root, name)
+                    current.deleteRecursively()
+                    val old = File(backup, name)
+                    if (old.exists() && !old.renameTo(current)) {
+                        old.copyRecursively(current, overwrite = true)
+                    }
+                }
+                staging.deleteRecursively()
+                backup.deleteRecursively()
+                pendingMarker().delete()
+                metaBackupFile().delete()
+                stampBackupFile().delete()
+                throw e
+            }
+            staging.deleteRecursively()
+            writeStamp(info, bundled)
+            val hadBackup = backup.isDirectory && !backup.listFiles().isNullOrEmpty()
+            if (hadBackup) {
+                // 保留 engine.old 直到引擎首次 Healthy；两次未确认则自动回滚。
+                pendingMarker().writeText("0")
+                Log.i(TAG, "runtime installed; engine.old kept pending first healthy boot")
+            } else {
+                backup.deleteRecursively()
+                metaBackupFile().delete()
+                stampBackupFile().delete()
+            }
             assetZip.delete()
-            Log.i(TAG, "runtime installed at $root (kept top dirs: ${topDirs.joinToString()})")
+            Log.i(TAG, "runtime installed at $root (${entries.size} top-level entries)")
         } finally {
             installing = false
         }
     }
 
-    private fun downloadTo(url: String, dest: File) {
-        val conn = URL(url).openConnection() as HttpURLConnection
-        conn.connectTimeout = 15_000
-        conn.readTimeout = 60_000
-        conn.instanceFollowRedirects = true
-        // getInputStream 隐式触发连接；非 2xx 视为失败
-        val code = conn.responseCode
-        check(code in 200..299) { "Download failed with HTTP $code: $url" }
-        conn.inputStream.use { input ->
-            dest.outputStream().use { input.copyTo(it) }
-        }
+    /** 写安装元数据：`.runtime.json`（新） + `.runtime-version`（旧代码/诊断仍读它）。 */
+    private fun writeStamp(info: RuntimeInfo, bundled: Boolean) {
+        val obj = JSONObject()
+            .put("version", info.version)
+            .put("builtAt", info.builtAt)
+            .put("sha256", info.sha256 ?: "")
+            .put("source", if (bundled) "bundled" else "download")
+            .put("installedAt", System.currentTimeMillis())
+        runCatching { metaFile.writeText(obj.toString()) }
+            .onFailure { Log.w(TAG, "cannot write .runtime.json: ${it.message}") }
+        runCatching { stampFile.writeText(info.version) }
+            .onFailure { Log.w(TAG, "cannot write .runtime-version: ${it.message}") }
     }
 
     private fun unzip(
@@ -555,6 +857,19 @@ class RuntimeInstaller(private val ctx: Context) {
         @Volatile
         var installing: Boolean = false
             private set
+
+        /**
+         * 进程级安装锁（v1.4.21）。
+         *
+         * `installing` 只是「有没有人在装」的标志，不能用来互斥 —— 引擎首启的
+         * 自动安装、关于页的显式更新、以及可能被服务重新拉起的启动流程会并发
+         * 进入。两个安装同时解压/换名会把 engine 目录拆坏，而此前 About 的
+         * `check(!installing)` 只是把后来者挡在门外（并抛出英文异常）。
+         *
+         * 现在所有入口都在这把锁上排队；`installing` 仍然保留给扩展中心做
+         * 「运行时装配中不要装扩展」的判断。
+         */
+        private val INSTALL_LOCK = Any()
 
         private const val TAG = "RuntimeInstaller"
 

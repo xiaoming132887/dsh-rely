@@ -1,5 +1,75 @@
 # AI_CONTEXT
 
+## v1.4.25 后续（2026-10-26，CI 偶发失败已处置）
+- **现象**：推 AI_CONTEXT 那次 main 的 android-build 红了，唯一失败 job 是
+  `build-apk (x86_64, full)`；同一份代码的 v1.4.25 tag 构建四 lane 全绿。
+- **诊断**：单文件文档 commit 不影响构建；本地用 CI 同一条命令
+  （`assembleDebug -Pabi=x86_64 -Ppackage=full -PruntimeZip=<绝对路径>`）构建成功；
+  GitHub 上 rerun-failed-jobs 后也全绿 → **runner 资源抖动，非代码问题**。
+- **但压力是真实的**：full 形态 debug+release 连续构建，每次吞吐 127MB
+  runtime.zip（解压 ~500MB），8 lane 并行时磁盘/内存都不宽裕。
+- **防护（commit 99c1fb4）**：build-apk 在 checkout 后先清掉用不到的预装组件
+  （dotnet / android ndk / ghc / boost / AGENT_TOOLSDIRECTORY），并前后打印
+  `df -h` + `free -m` —— 下次若复现可直接从日志判断是磁盘还是内存。
+- **验证**：该 commit 的 main 构建 run 40296459217 全绿（8 个产物 job 全 ok）。
+- 注：GitHub Actions 的 job 日志下载 API 需要 admin 权限（token 403），
+  排查失败原因只能用 annotations / 失败步骤名 / 本地复现三条路。
+
+## v1.4.25 已发布（2026-10-26，PR #48 合并 + #47 修复，CI 7 分钟全绿）
+- **合并 PR #48**（merge ec42f90，作者 XiaoPb，182 文件）：运行时解耦 / full+noruntime
+  双形态 / 签名索引 / 原生深浅主题 / 桌宠。合并前验证：merge-tree 无冲突、我方
+  v1.4.21–24 全部修复均保留、编译通过、i18n + 两个探针全过。
+- **合并前确认前置条件**：`@xiaopb/dsh-pet-bridge@0.3.1` 已发布，且实测其 tarball
+  确实含 `X-DSH-Pet-Token`（bubble.js 2 处）+ `Content-Length` + 读
+  `DSH_PET_BRIDGE_TOKEN` —— 这是我上轮提的 P1 缺口，作者实现完整。
+- **#47 真因修复**（355d44f）：`loadCatalog()` 从未解析 `apkUrl`/`apkSha256`/
+  `apkPackage`（数据类有字段、构造时没赋值）→ APK 型扩展（Offline ASR / 本地识别
+  应用）**从 v1.2.127 引入功能起就没装上过**。v1.4.24 我只改了报错文案，是误判。
+- **构建流程变更（重要，以后本地构建必须照做）**：
+  1. `src/main/assets/runtime.zip` 现在**会和新流程冲突**（Duplicate resources）——
+     构建前先挪走；
+  2. 用 `-PruntimeZip=<绝对路径>` 指定运行时（**相对路径会失败**：Gradle 的
+     `file()` 基准是 app 模块目录）；
+  3. 源 zip 必须已带 PTC v2 补丁 + polyfill v4，否则 prepareRuntime 门禁直接抛
+     「APK builds must not patch runtime.zip anymore」（门禁设计如此，不许现场打）；
+  4. 完整命令：`gradle :app:assembleDebug -Pabi=x86_64
+     -PruntimeZip="<abs>"/_runtime_bak/rt-x86_64-zodded.zip`
+- **发布产物结构变化**：12 个资产 = 8 APK（arm64/x86_64 × debug/release ×
+  full/noruntime）+ 2 runtime zip + runtime-index.json + .sig。
+  full 包 146.8MB（比之前 227MB 小很多，运行时去重生效）；noruntime 仅 23MB。
+- **模拟器实测**：装 full 包 → RuntimeInstaller 识别 bundled 版本更新 → 重装
+  （engine.old 保留待健康）→ 16s 引擎健康 → 插件中心 3540 插件正常。
+
+## v1.4.24 已发布（2026-10-26，tag run 40269198794，8 分钟全绿）
+- **宝宝反馈四条 → 全部处理**：
+  ① 社区 dsh-web-mobile 插件 bug 太多 → **整体移除**（assets 860KB/6 文件、
+     overlay insert、部署列表、shell-overrides 注入、失效的 sidebar_* 设置全清）。
+     实测 overlay 只剩自有 4 个窄屏插件。**v1.4.23 已下架**（改 draft 后删除，
+     远端 tag 也已删）。
+  ② 插件中心太简单 → 参考 dsh-market（8.9k star）接入 `dsh-plugin-catalog`：
+     3540 插件 / 23 分类 / 中英双语 / 版本历史，精简后 1.7MB 内置进
+     `assets/market/catalog.json`（**注意：不能放 assets/extensions/，会被
+     check-i18n.py 当扩展目录解析而报错**）。browse 改本地子串搜索，零延迟。
+     分类 chip 切换要强制重载（缓存是全分类结果）。
+  ③ 设置页杂乱 → 4 分区拆成 8 个语义分区（外观/权限/语音/扩展/数据/网络/
+     维护/关于），22 项变 25 项（补回 Root 能力 / Shizuku 状态两行——它们原本
+     是 rowPriv 的兄弟节点，按 row id 提取会漏）。
+  ④ 图标重复 → 新做 11 个（rotate/palette/layout/mic_wave/headset/apk/note/
+     export/lan/log/clock），替换 10 处重复，25 项图标全唯一。
+- **引擎重启逻辑重写**（宝宝要求「异常退出时把 3080 上所有东西杀掉再完整启动」）：
+  * `reclaimPort` 改为按**端口持有者**清场：读 /proc/net/tcp{,6} 的 LISTEN
+    inode → 扫 /proc/<pid>/fd 匹配 socket:[inode] → kill -9。不再依赖 cmdline
+    匹配 files/engine/bin/node（包装层会失效）。
+  * **关键盲区**：引擎「健康运行后被杀」走的是 Healthy 分支，原来直接进下一轮
+    spawn、完全跳过自愈判定段——第一次加的清场代码根本没执行。已在该分支补
+    reclaimPort。
+  * 新增 `looksLikeAuthFailure()`：只扫本次启动日志段，命中 401/403/
+    unauthorized/invalid api key/token expired/credentials/EACCES → State.Failed
+    + 三语提示「登录已失效，请重新登录」，return 不再重试（防重启风暴）。
+- **实测**：kill -9 引擎 node → 'port 3080 is free after thorough reclaim'
+  → 6.4s 后 'engine healthy' ✓
+- 4 资产上线（release 227.4MB）。
+
 ## v1.4.23 已发布（2026-10-26，配色/布局/快捷栏三项用户反馈，tag run 40254177003）
 - **宝宝三条反馈**：① DSHA 蓝太丑、要原来的颜色；② 手机插件的侧边快捷栏没了；
   ③ 设置页太乱，想要卡片/网格布局。
@@ -87,6 +157,67 @@
 - 4 资产上线（arm64/x86_64 × debug/release）。含 #42/#43/#44/#47 四项修复 +
   README 体积修正 + CI 刷包修复。versionCode 270。
 - issue #42/#43/#44/#47 已通知报告人验证。
+
+
+## v1.4.20 合并（2026-10-25，main → dev → main）
+- 分叉点 `f613583`：main 侧 7 个提交（v1.4.19 发布线：polyfill v4、release job 降级、版本 269），
+  dev 侧 2 个提交（桌宠悬浮窗预留、CI fork 开关 + dsh-hardssh 0.2.13）。冲突仅 2 处：
+  本文件与 `.github/workflows/android-build.yml`（release job 的 if）。
+- **发布语义（本仓库，固定）**：
+  - 正式版：只接受严格 tag `v<major>.<minor>.<patch>`（如 `v1.4.20`），push tag → `publish-release`；
+    **禁止 `v*.*.*-*`**（如 `v1.4.18-380`）——CI 首个 job 校验失败，不会发版。
+  - 预览版：每日 01:30 Asia/Shanghai `schedule` → `publish-preview`（cron 写 `30 17 * * *`，GitHub 按 UTC 解析；
+    workflow 级 `TZ: Asia/Shanghai` 供其余步骤使用），双架构 debug 包发到滚动 prerelease `preview`，
+    覆盖同名资产并清理旧文件名，只保留最新一版。
+  - edge：push `main` → `publish-edge`（debug + release，滚动 `edge`）。
+- 刷包根因记录：旧 release job 每次 push/定时新建 `v<ver>-<run>` Release，该 tag 又命中
+  `on.push.tags: v*` 触发下一轮构建 → 自激刷包（v1.4.18-380/381/382/384）。现在预览固定用
+  tag `preview`，工作流不再创建任何 `v*` tag。
+- 合并后 `versionCode 269 / versionName 1.4.19`（v1.4.19 已发布），下次正式发版 `270 / 1.4.20`。
+- 仓库整理：根目录 20 个 `RELEASE_NOTES_v1.*.*.md` 移入 `docs/release-notes/`，README 三语已加归档链接。
+
+
+## v1.4.21 待发（桌宠悬浮窗预留：插件驱动、不打包插件/素材）
+- **需求**：预留系统悬浮桌宠；用户自行安装 dsh 插件后开启；不改 dsh-pet 本体。
+- **生态事实修正**：真正可用的是 `dsh-pet-bridge@0.1.0`（cc-pet HookServer 协议），
+  五字段是 `kind/agent_source/tool_name/tool_input/caller_pid`，**没有 bubble 文本**；
+  `tool/result→post` 不带工具名，所以原生只显示「完成一步」，不伪造「已读 xxx」。
+- **实现**：新增 `app.dsh.mobile.pet`（Protocol/BridgeServer/Controller/Pack/Installer/
+  Renderer/View/Physics/Service/Menu/Settings/Prefs/Detector/Status）。独立前台服务，
+  `TYPE_APPLICATION_OVERLAY`，不碰 `StatusOverlay` 的无障碍 overlay。
+- **入口**：设置→扩展→桌面宠物；桥插件装了但没重启引擎时给出「重启引擎」。
+  `PluginCenter.BUILTIN` 与 `community-plugins.json` 增加 `dsh-pet-bridge` 目录项，
+  但不随包安装；pnpm/symlink 手工方式不采用。
+- **动画**：不打包任何 WebP；默认 Canvas 占位鲸鱼；用户可导入 dsh-pet-android 的
+  APK/zip（`assets/pet-config.json` + `assets/webp/*.webp`）。导入有路径穿越、
+  entry/大小/空间限制，临时目录原子替换。素材许可为「禁止商用」，见 `NOTICE`。
+- **协议/限制**：仅 `127.0.0.1:7779`；8KB body、5s 超时、2 worker；stop 1.5s 宽限；
+  引擎被杀时 30s 看门狗回待机；窗口矩形透明区仍挡触摸（已写文档）。
+- **插件来源与版本声明（硬约束）**：桥插件必须是 `@xiaopb/dsh-pet-bridge` ≥ **0.3.1**
+  （npm 包名或 GitHub `XiaoPb/dsh-pet-bridge` 均可）。协议 v2 的 `X-DSH-Pet-Token`
+  与显式 `Content-Length` 均从 0.3.1 起；npm 无 scope 的 `dsh-pet-bridge` 只到 0.1.0
+  （归上游，无法发新版），装上必 403/400。App 侧 `PetPluginDetector.MIN_BRIDGE_VERSION`
+  做 fail-closed 门禁：装了旧版 → 设置页显示「需 0.3.1+」并禁止开启（弹窗引导去插件中心，
+  无「仍然开启」旁路）；同时兼容识别上游遗留包名并标记 legacy。
+- **验证**：`scripts/probes/_test_pet_overlay.py`、`scripts/check-i18n.py`、
+  `_test_responsive_native_ui.py` 全过；pet 包用 kotlinc 2.3.20 + android.jar 编译通过；
+  aapt2 compile + link（android-36）全资源通过；本机无 Gradle wrapper/ML Kit 缓存，
+  完整 `assembleDebug` 与模拟器端到端待 CI/Android Studio 补跑。
+
+## v1.4.19 待发（CI fork 开关 + dsh-hardssh 0.2.13）
+- **Fork CI**：`release` / `publish-release` / `publish-edge` 的仓库门禁改为
+  `github.repository == 'Soodok/...' || vars.ENABLE_CI_IN_FORK == 'true'`。
+  Fork 用户只需在仓库 Variables 新建 `ENABLE_CI_IN_FORK=true` 即可自行编译/发布；
+  PR 仍不发，签名材料仍需自行配置。文档已补在 `docs/RELEASE.md`。
+- **dsh-hardssh**：`HARDSSH_REF` 从 v0.2.10 的 `c7e2bd1` 升到 0.2.13 的
+  `09a1d1fb58b2fe63e19b7e9fc4300bc79bcc5d20`（XiaoPb/dsh-hardssh）。
+- **包名变更**：v0.2.11 起 npm 包名由 `@tiphareth/dsh-hardssh` 改为
+  `@xiaopb/dsh-hardssh`（cordis.patch.yml 同步改名）。联动修改：
+  `EngineConfig.SSH_PLUGIN_PACKAGE`、profile 链接路径、runtime 注入路径、
+  CI 闭包校验、`pack-hardssh-plugin.sh` / `inject-hardssh-plugin.sh`、文档与 README。
+  `EngineConfig.LEGACY_SSH_PLUGIN_PACKAGE` 仅用于识别用户已装的旧包并让位。
+- **未验证**：本机无 pnpm 依赖缓存/CI，尚未实际跑 v0.2.13 的 `pnpm install + build`
+  与 Android 端 SSH 冒烟；以 CI 构建和真机 SSH 工作区为准。
 
 ## 2026-10-25 issues/PR 批量处理
 - **修复已推送**（commit 2a3db3d，将随 v1.4.20 发）：
@@ -1540,7 +1671,7 @@ const rightbar = rightbar === 0 || available < 300 ? 0 : Math.min(available, …
 2. `gradle assembleRelease -Pabi=arm64-v8a` → `apksigner sign --ks keystore/dsh-release.keystore …`；
 3. `gradle assembleDebug -Pabi=arm64-v8a`（Release 按惯例带 debug 包）；
 4. 分片 push（10MB）+ `pm install -r` 真机验证；
-5. `git add app/ README*.md RELEASE_NOTES*.md AI_CONTEXT.md`（**不要 `git add -A scripts/`**，
+5. `git add app/ README*.md docs/release-notes/*.md AI_CONTEXT.md`（**不要 `git add -A scripts/`**，
    probes 里有凭证/大文件）；`git push`（需 token，网络不稳时重试）；
 6. GitHub API 建 release + `uploads.github.com` 传两个 APK（144MB 约 30s/个）。
 
@@ -2217,3 +2348,80 @@ URL: https://github.com/Soodok/Deepseek-Harness-Local-Android/releases/tag/v1.4.
   `scripts/make-lite-runtime.py`，但直接删包会导致 office-to-pdf 的 Cordis 依赖链
   断裂，进而 directory-picker/workspace 等核心服务不可用。正确解法是「overlay 里
   disabled: true + 只剔静态资源」，实验做到一半用户叫停。用户确认「先不管」。
+
+---
+
+## v1.4.20 运行时分发解耦（2026-10-25 进行中）
+
+### 目标
+- APK 双形态：`full`（内嵌 `runtime.zip`）与 `noruntime`（首启/关于页下载）；tag/preview 各 8 个 APK，edge 只发 4 个 noruntime。
+- hardssh 与 runtime 解耦：CI 从上游 `XiaoPb/dsh-hardssh` Release 取 tgz（用 npm integrity 校验），组装成 `assets/hardssh/`；App 启动由 `HardsshInstaller` 补装，runtime 重装后自动恢复。
+- 运行时单一流水线 `scripts/build-runtime.sh`：collect → zod/SONAME 去重 → 补丁/闭包/架构校验 → `BUILD.json` + `runtime.json`。
+- 生成式 assets：`app/build.gradle.kts` 的 `prepareRuntimeAssets` 写 `build/generated/runtimeAssets/`；参数 `-Ppackage=full|noruntime`、`-PruntimeZip`、`-PhardsshDir`、`-PruntimeUrlBase`；不再改工作树。
+- MANIFEST schema v2：runtime urls 直连 + `gh-proxy.org`、hardssh 元数据、`updates.indexUrl`。
+- 云端索引：tag Release 内 `runtime-index.json` + `.sig`；App 从 `releases/latest/download/runtime-index.json` 读取并验签。**不新增 runtime 渠道**。
+- 索引签名复用 APK 正式 keystore：CI 从 `RELEASE_KEYSTORE_BASE64` 解 PKCS12 取私钥（RSA/SHA256withRSA），App 验签公钥由 `generateIndexPubKey` 在构建期从同一 keystore 导出（**不提交 PEM**），并回退到 APK 自身签名证书；不新增 secret。
+- Fork 自动更新链接：`scripts/apply-fork-links.py` 在构建期把模板里的 `Soodok/Deepseek-Harness-Local-Android` 替换为 `<owner>/Deepseek-Harness-Local-Android`，生成 `RepoConfig.kt`；Soodok 原样不动。
+- 安装健壮性：`HttpDownloader`（续传/URL 回退/sha）+ `engine.staging` 校验后换名、失败从 `engine.old` 回滚；空间预算按旧 + staging + zip 峰值。
+
+### 关键文件
+`scripts/pack-hardssh.sh`、`scripts/build-runtime.sh`、`scripts/write-runtime-manifest.py`、`scripts/write-runtime-index.py`、`scripts/sign-runtime-index.py`、`scripts/apply-fork-links.py`、`scripts/verify-apk-assets.py`、`app/src/main/java/app/dsh/mobile/engine/{HardsshInstaller,RuntimeIndexClient,HttpDownloader,RuntimeInstaller}.kt`、`app/src/main/java/app/dsh/mobile/engine/RepoConfig.kt.tmpl`。
+
+### 待验证
+- CI 首跑（本地按用户要求未编译）：Gradle `-Ppackage` 生成式 assets、2×2 矩阵、tag 的 index 签名。
+- 真机首启 noruntime 下载/续传/代理、runtime 重装后 SSH 恢复、完整包不被旧内置运行时降级。
+
+### 验证记录（2026-10-25）
+- CI run [`40185178035`](https://github.com/XiaoPb/Deepseek-Harness-Local-Android/actions/runs/40185178035) @ `68c7421` **全绿**：build-hardssh、collect-runtime ×2、build-apk（full/noruntime × arm64/x86_64）、monitor。
+- 产物：`runtime-arm64-v8a.zip` 123.9 MB（原 219.5 MB，zod/SONAME 去重生效）；noruntime 双 APK artifact 31.6 MB；full 双 APK artifact 279.4 MB。
+- 首次 CI 编译失败根因：`compileSdk 36` 的 `android.content.pm.Signature` 移除了 `getPublicKey()`；改为 `toByteArray()` → X.509 证书 → `publicKey`。
+- 本地额外验证：`assembleDebug -Ppackage=noruntime` 23.4 MB（无 runtime.zip、含 hardssh/公钥）；`-Ppackage=full` 229 MB（基线旧 runtime）并通过 `verify-apk-assets.py`。
+- tag 通道本地验证：`GITHUB_REF_TYPE=tag` 生成 `<fork>/releases/download/v1.4.19/runtime-<abi>.zip` + sha；`branch/main` 生成 `releases/latest/download/...` 且不带 sha；`GITHUB_REPOSITORY=XiaoPb/...` 时 `RepoConfig`/manifest 全部指向 Fork。
+- 索引签名本地模拟：真实 `dsh-release.keystore` → PKCS12 取私钥 → RSA 签名 → 证书公钥验签 OK。
+- 未验证：`publish-edge` / `publish-preview` / `publish-release` 的实际 GitHub Release 上传（dev push 上按设计跳过）。
+
+### v1.4.19 发布与真机验证（2026-10-25）
+- tag `v1.4.19`（commit `718109c`，在 dev 分支上）CI 全绿，`publish-release` 成功。
+- Release 共 12 个资产：8 APK（full 146–147 MB / noruntime 22–24 MB）+ 2 runtime zip（127 MB）+ `runtime-index.json` + `.sig`。
+- 用正式 keystore 证书公钥验签 index → OK；`runtime-arm64-v8a.zip` 实测 sha256 `ea2f4b57…`、大小 133,687,953，与 index/manifest 一致。
+- MuMu（x86_64, Android 12）：
+  - 原安装包为 **debug 签名**（`CN=Android Debug`, `36f752cb…`），与 release 证书 `ea844b60…` 不同；卸载旧包后安装 `x86_64-release-noruntime.apk`。
+  - 首启出现“需要下载运行时 / 127 MB / 下载完整包 / 稍后 / 下载并启动”确认框。
+  - 点击下载后走 GitHub 直连成功（133,199,450 bytes，约 70s），`RuntimeInstaller` 解压 6 个顶层目录，`HardsshInstaller` 安装 `@xiaopb/dsh-hardssh@0.2.13`，引擎 Healthy，左侧栏出现「SSH 工作区」。
+- 尚未验证：SSH 实际连接、关于页运行时更新、full 包离线安装、gh-proxy 回退（本次直连成功未触发）。
+
+### v1.4.20 运行时 UX 修复（2026-10-25）
+- MuMu 首次安装 noruntime 暴露两个问题：下载阶段进度条不显示；下载超过 45s 时启动遮罩被 watchdog 收起，露出黑 WebView。
+- 修复：`RuntimeInstaller` 在下载阶段发布 `DOWNLOADING` + 字节进度（下载占 45%，解压占 55%）；启动遮罩在 `Installing/Starting` 期间每 15s 续期（最多 5 分钟），不再中途收起；遮罩重做为渐变 + 卡片 + 品牌 tagline。
+- 修复 ABI 选择：`AboutActivity`/`RuntimeInstaller`/`SelfCheck` 改用 `Build.SUPPORTED_ABIS.first()`，避免 MuMu 等带 arm 转译的 x86 设备误选 arm64 运行时（表现为 `bundled e_machine=183, device expects 62`）。
+- 关于页在已安装时显示“运行时 <version> 已是最新”，不再显示“可用，点击安装”。
+- v1.4.20 版本号升至 270/1.4.20；MuMu 实测：首启 1:09 时仍显示下载卡片（112/127MB），完成后引擎 Healthy；关于页显示 x86_64 版本已是最新。
+- 原生主题（v1.4.20）：`ThemeMode` 深色（默认）/浅色/跟随系统；`ThemedActivity` + `ThemeManager.wrap` 用 uiMode 选择 `values`/`values-night`；引导页与设置页均可切换；全部 layout/drawable 颜色改为语义色资源。WebView 不专门处理。
+
+### 追加验证（同日）
+- **gh-proxy 可用性**：通过 `https://gh-proxy.org/https://github.com/...` 下载 x86_64 完整包（146.1 MB）成功，`verify-apk-assets` 通过。
+- **full → noruntime 覆盖**：同一 release 签名下 `adb install -r` 完整包覆盖 noruntime 成功；App 复用已下载运行时，引擎 Healthy，SSH 工作区入口仍在。
+- MuMu 侧最终状态：v1.4.19 完整包 + 已下载 `runtime-x86_64` + hardssh 0.2.13；未清除用户数据。
+
+---
+
+## v1.4.21 运行时下载代理与安装并发修复（2026-10-25，未发布）
+
+### 问题
+- 关于页「运行时更新」偶发 `runtime install already in progress`。
+- 根因：`RuntimeInstaller.installFromIndex()` 用进程级 `installing` 布尔量做 `check()` 互斥；该标志在引擎首启自动安装期间也为 true。用户在首启下载期间触发更新，或安装中再点一次（About 行会重新 check → 再次可安装），就会直接抛英文异常。且 `stop()` 只 cancel 不 join，首启的阻塞 IO 安装仍可能占着标志。
+- About 行自身没有防重入：第一次点击启动安装后，再点会走 check，check 完 pending 又变成「可安装」，第三次点击再次进入安装器。
+
+### 修复
+- `RuntimeInstaller` 增加进程级 `INSTALL_LOCK`：`ensureInstalled` 与 `installFromIndex` 串行，后到者等待而非报错；`installing` 保留给扩展中心做「装配中不要装扩展」判断。
+- 关于页增加 `runtimeInstalling` + `RuntimeInstaller.installing` 双重防重，重复点击提示「运行时正在安装，请稍候再试」。
+- 新增 `RuntimeDownloadConfig`：默认 `https://gh-proxy.org/`；设置 → 扩展 → 运行时下载代理可改前缀或留空直连。运行时 zip 与签名索引统一「代理优先、直连兜底」，已代理地址不二次包装；用户显式关闭代理时剔除 MANIFEST/索引里预置的镜像地址。
+- 首启 noruntime 下载同样读取该配置，不再依赖 MANIFEST 里的 `urls` 顺序先等直连超时。
+
+
+### 主题切换入口在 rebase 中丢失 → 修复（2026-10-26，分支 fix/theme-menu）
+- 现象：v1.4.24 第三次 rebase 对 `OnboardingActivity`/`SettingsActivity` 整文件取上游，`e7d85ec` 的接线（两处 `ThemePref.set`）被丢弃——`ThemePref.set` 全仓 0 调用点，偏好永远停在默认深色；引导页三卡"看得见点不动"，设置页外观行整行消失（`setting_theme` 成孤儿字符串）；上游把 `activity_settings.xml`（106 处）与 `activity_plugin_store.xml`（4 处）重写为硬编码深色，浅色下白底白字。
+- 修复：`AboutActivity`/`OnboardingActivity`/`SettingsActivity` 改继承 `ThemedActivity`（attachBaseContext 的 LocaleHelper.wrap 保留，主题在基类叠加）；引导页重绑三卡 + 选中态高亮，点击写偏好并 recreate（方向/权限选择经 onSaveInstanceState 保留）；设置页外观分区加回「外观主题」行（新 `ic_theme` 图标）+ 三选一对话框，选完 recreate，返回主界面由 `MainActivity.onResume` 的 appliedTheme 检测接力；两个布局硬编码色全部替换为 `@color/*`（昼/夜 26 个色名已对齐）。
+- 新探针 `scripts/probes/_test_theme_menu.py`（28 项）：`ThemePref.set` 必须有调用点、引导卡必须绑定、设置行必须接线、两个布局禁止出现 `#hex` 硬编码、三语五条文案齐全、values-night 覆盖全部昼间色名——防止下次整文件覆盖再静默丢掉入口。
+- MuMu（Android 12 x86_64）实测：浅色↔深色双向切换，设置页与本页 recreate、主界面返回时重建均正常，两主题截图逐行确认可读；pet/responsive/theme-menu 三组探针全绿。
+- 追加（同日，插件页复核）：实机复核发现**代码内**的状态色同样是深色调校的——插件市场卡片插件名是 `setTextColor(0xFFFFFFFF)`，浅色下直接隐形；五个主题化页面（PluginStore/About/ExtensionStore/Settings/PetSettings）共 69 处 `0xFF...` 状态色替换为 `getColor(R.color.*)`（ExtensionStore 的 companion 徽章色存 resId、实例侧解析，避免 companion 无 Context）；探针补 6 项「代码内禁止深色专用字面量」。MuMu 复核：插件市场浅/深两主题插件名与状态文字均清晰，桌宠设置页浅色下「已授权/已安装」深绿可读，关于页浅色正常。

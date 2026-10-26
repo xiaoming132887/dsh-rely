@@ -1,6 +1,7 @@
 package app.dsh.mobile.engine
 
 import android.util.Log
+import app.dsh.mobile.pet.PetBridgeServer
 import java.io.File
 import java.nio.file.Files
 
@@ -93,13 +94,20 @@ object EngineConfig {
         File(engineRoot(ctx), "lib/node_modules/@deepseek-ai/dsh/lib/bin.js")
 
     /**
-     * 内置 SSH 远程工作区插件（@tiphareth/dsh-hardssh）的包名。
+     * 内置 SSH 远程工作区插件（@xiaopb/dsh-hardssh）的包名。
+     *
+     * v0.2.11 起 XiaoPb fork 的 npm 包名由 @tiphareth/dsh-hardssh 改为
+     * @xiaopb/dsh-hardssh；旧名字只用于识别用户自己装过的历史插件，避免
+     * 内置层与用户 bundle 同时插入同一组 hardssh 行。
      *
      * 插件由 CI 从 GitHub 固定 ref 构建，作为 runtime.zip 的一部分躺在引擎目录
      * （`lib/node_modules`）里，因此与引擎同版本、同生命周期：升级 runtime 即
      * 升级插件，而 profiles / sessions 等用户数据不受影响。
      */
-    const val SSH_PLUGIN_PACKAGE = "@tiphareth/dsh-hardssh"
+    const val SSH_PLUGIN_PACKAGE = "@xiaopb/dsh-hardssh"
+
+    /** 旧 fork / 上游包名，仅用于 profile 让位判断。 */
+    const val LEGACY_SSH_PLUGIN_PACKAGE = "@tiphareth/dsh-hardssh"
 
     fun sshPluginDir(ctx: android.content.Context): File =
         File(engineRoot(ctx), "lib/node_modules/$SSH_PLUGIN_PACKAGE")
@@ -110,8 +118,8 @@ object EngineConfig {
      * ## 为什么需要一条符号链接
      * dsh 的 Loader 以 profile 目录为 baseUrl 解析插件名（Node 的父目录
      * node_modules 查找）。内置插件在 `engine/lib/node_modules`，不在 profile 的
-     * 查找链上；在 `$DSH_HOME/profiles/node_modules/@tiphareth/dsh-hardssh` 放一条
-     * 指向引擎目录的链接，既让 patch 里的 `@tiphareth/dsh-hardssh` / `/fs` /
+     * 查找链上；在 `$DSH_HOME/profiles/node_modules/@xiaopb/dsh-hardssh` 放一条
+     * 指向引擎目录的链接，既让 patch 里的 `@xiaopb/dsh-hardssh` / `/fs` /
      * `/subprocess` 三个名字可解析，又不复制文件 —— runtime 升级后链接自动指向
      * 新版本。
      *
@@ -133,11 +141,13 @@ object EngineConfig {
             Log.w(TAG, "bundled ssh plugin missing at ${pkg.absolutePath}; ssh workspace disabled")
             return null
         }
+        val profileModules = File(dshHome(ctx), "profiles/node_modules")
+        cleanupLegacySshLink(ctx, profileModules)
         if (profileManagesSshPlugin(ctx)) {
             Log.i(TAG, "ssh plugin is managed by the web profile bundle; built-in patch layer skipped")
             return null
         }
-        val link = File(File(dshHome(ctx), "profiles/node_modules"), SSH_PLUGIN_PACKAGE)
+        val link = File(profileModules, SSH_PLUGIN_PACKAGE)
         val ok = runCatching {
             link.parentFile?.mkdirs()
             if (Files.isSymbolicLink(link.toPath())) {
@@ -167,6 +177,28 @@ object EngineConfig {
     }
 
     /**
+     * 清掉旧版 App 创建的 @tiphareth/dsh-hardssh 内置链接。
+     *
+     * 只删「指向 engine 目录内的符号链接」，不碰用户自己安装的实体目录或外部链接；
+     * 否则升级到新包名后，旧链接仍可能让 profileManagesSshPlugin 误判为
+     * 「用户已管理」而跳过新内置层。
+     */
+    private fun cleanupLegacySshLink(ctx: android.content.Context, profileModules: File) {
+        val legacy = File(profileModules, LEGACY_SSH_PLUGIN_PACKAGE)
+        if (!Files.isSymbolicLink(legacy.toPath())) return
+        val target = runCatching { Files.readSymbolicLink(legacy.toPath()) }.getOrNull() ?: return
+        val targetFile = if (target.isAbsolute) target.toFile() else File(profileModules, target.toString())
+        val engine = engineRoot(ctx)
+        val isOurs = runCatching {
+            targetFile.canonicalPath.startsWith(engine.canonicalPath + File.separator)
+        }.getOrDefault(false)
+        if (isOurs) {
+            runCatching { Files.delete(legacy.toPath()) }
+                .onFailure { Log.w(TAG, "legacy ssh link cleanup failed: ${it.message}") }
+        }
+    }
+
+    /**
      * profile 是否已经自己管理了 SSH 插件（社区插件中心安装）。
      *
      * 只看真正会生效的 bundle 列表与 profile 本地 node_modules：dependencies 里
@@ -174,17 +206,18 @@ object EngineConfig {
      */
     private fun profileManagesSshPlugin(ctx: android.content.Context): Boolean = runCatching {
         val profileDir = File(dshHome(ctx), "profiles/web")
+        val managed = setOf(SSH_PLUGIN_PACKAGE, LEGACY_SSH_PLUGIN_PACKAGE)
         val manifest = File(profileDir, "package.json")
         if (manifest.isFile) {
             val bundles = org.json.JSONObject(manifest.readText())
                 .optJSONObject("dsh")?.optJSONObject("profile")?.optJSONArray("bundles")
             if (bundles != null &&
-                (0 until bundles.length()).any { bundles.optString(it) == SSH_PLUGIN_PACKAGE }
+                (0 until bundles.length()).any { bundles.optString(it) in managed }
             ) {
                 return@runCatching true
             }
         }
-        File(File(profileDir, "node_modules"), SSH_PLUGIN_PACKAGE).isDirectory
+        managed.any { File(File(profileDir, "node_modules"), it).isDirectory }
     }.getOrDefault(false)
 
     /**
@@ -1192,14 +1225,12 @@ object EngineConfig {
             |- insert:
             |    - id: android-chat-perf
             |      name: ./android-plugins/chat-perf/index.js
-            |
-            |# DSHA-style mobile WebUI (adapted from the upstream dsh-web-mobile
-            |# plugin): a client plugin package that reskins the desktop WebUI into
-            |# a phone UI. Host side also registers a same-origin session-delete
-            |# route (/api/mobile-nav.session.delete) used by the mobile drawer.
-            |- insert:
-            |    - id: dsh-web-mobile
-            |      name: ./android-plugins/dsh-web-mobile/index.js
+            |# v1.4.24: the community dsh-web-mobile plugin was removed. It turned the
+            |# sidebar into a drawer and also registered a session-delete route plus
+            |# response compression; in practice it produced many bugs (vanishing quick
+            |# rail, broken panels), so it is no longer shipped. Mobile adaptation is back
+            |# to this repo's own four narrow-screen plugins (narrow-sidebar /
+            |# narrow-settings / narrow-rightbar / chat-perf).
 
             |""".trimMargin()
         runCatching {
@@ -1233,9 +1264,6 @@ object EngineConfig {
                 "narrow-settings" to listOf("package.json", "index.js", "client.js"),
                 "narrow-rightbar" to listOf("package.json", "index.js", "client.js"),
                 "chat-perf" to listOf("package.json", "index.js", "client.js"),
-                "dsh-web-mobile" to listOf(
-                    "package.json", "index.js", "client.js", "compress.js", "delete-session.js",
-                ),
             ).forEach { (pkg, files) ->
                 files.forEach { fileName ->
                     val src = ctx.assets.open("android-plugins/$pkg/$fileName")
@@ -1346,6 +1374,9 @@ object EngineConfig {
             // 桥 token（v1.2.99）：只交给引擎子进程，供 scr/notify 等闸门脚本鉴权。
             // 第三方 App 拿不到 → 无法调用读屏/点击/通知等设备能力。
             "DSH_BRIDGE_TOKEN=${AgentBridge.currentToken().orEmpty()}",
+            // 桌宠桥 token（v1.4.21，PR #48 评审）：dsh-pet-bridge 插件 POST
+            // /bubble 时带 X-DSH-Pet-Token 头；惰性生成，进程内稳定，不落盘。
+            "DSH_PET_BRIDGE_TOKEN=${PetBridgeServer.currentToken()}",
             "LD_LIBRARY_PATH=" + (
                 listOf(File(root, "lib"), File(root, "usr/lib")) +
                     extRoots.map { File(it, "lib") }

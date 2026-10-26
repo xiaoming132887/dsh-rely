@@ -38,7 +38,10 @@ object PluginMarket {
     private const val CATALOG_URL =
         "https://raw.githubusercontent.com/Soodok/Deepseek-Harness-Local-Android/main/community-plugins.json"
 
-    private const val REGISTRY_SEARCH = "https://registry.npmjs.org/-/v1/search"
+    private const val CATALOG_ASSET = "market/catalog.json"
+
+    /** 浏览时最多为多少条做联网兼容性探测（每次一个 registry 请求） */
+    private const val COMPAT_PROBE_LIMIT = 8
 
     // ─────────────────────────────────────────────────────────────────────
     // 数据模型
@@ -73,18 +76,27 @@ object PluginMarket {
         val pkg: String,
         val name: String,
         val desc: String = "",
+        /** 英文描述（目录里中英双语，按界面语言挑选） */
+        val descEn: String = "",
+        /** 目录分类 id（ui/tools/session/...，23 类） */
+        val category: String = "",
         val version: String = "",
         val installedVer: String? = null,
         val author: String = "",
         val repo: String = "",
+        val homepage: String = "",
         val unpackedSize: Long = 0L,
-        val updatedAt: Long = 0L,          // registry 的 time.modified（毫秒）
+        val updatedAt: Long = 0L,          // 秒或毫秒按来源，统一为毫秒
         val downloadCount: Int = 0,
         val official: Boolean = false,
         val compat: Compat = Compat.UNKNOWN,
         val compatReasons: List<String> = emptyList(),
         val builtin: Boolean = false,      // 引擎自带（不可卸载）
     ) {
+        /** 按界面语言挑描述：中文界面优先中文，英文界面优先英文，缺则回退 */
+        fun descFor(chineseUi: Boolean): String =
+            if (chineseUi) desc.ifBlank { descEn } else descEn.ifBlank { desc }
+
         val isInstalled: Boolean get() = installedVer != null
         /** npm 上有比已装版本更新的版本 */
         val hasUpdate: Boolean
@@ -160,35 +172,48 @@ object PluginMarket {
      *
      * @param onDone 后台线程回调；(结果, 失败原因)；失败原因非空时 UI 回退精选清单
      */
+    /**
+     * 浏览/搜索内置目录（v1.4.24 重做，参考 dsh-market）。
+     *
+     * 与旧版的区别：不再依赖 npm 搜索 API（返回信息太贫瘠且国内常超时），
+     * 直接读内置的 3540 条目录——离线可用、带分类与双语描述。搜索在本地做
+     * 子串匹配（包名/标题/中英描述），零网络延迟。
+     *
+     * @param category 分类 id；空 = 全部
+     * @param checkCompat true 时才联网补兼容性判定（逐包查 registry，较慢）
+     */
     fun browse(
+        ctx: Context?,
         query: String,
+        category: String,
         installed: Map<String, String>,
         checkCompat: Boolean,
         onDone: (List<Entry>, String?) -> Unit,
     ) {
         Thread({
-            val q = if (query.isBlank()) "keywords:deepseek-harness" else query.trim()
-            val catalog = fetchCatalog()
-            val officialPkgs = catalog.map { it.pkg }.toSet()
-            val result = runCatching {
-                val encoded = URLEncoder.encode(q, "UTF-8")
-                val text = httpGet("$REGISTRY_SEARCH?text=$encoded&size=100")
-                parseSearch(text, browse = query.isBlank(), officialPkgs, installed)
+            val all = fetchCatalog(ctx)
+            if (all.isEmpty()) {
+                onDone(emptyList(), "catalog unavailable")
+                return@Thread
             }
-            val remote = result.getOrElse {
-                Log.w(TAG, "npm search failed: ${it.message}")
-                emptyList()
-            }
-            // 合并策略：浏览态总是并入精选；搜索态仅在 npm 失败时兜底并入
-            //（搜索有结果就尊重用户意图，不要把无关精选塞进来）。
-            val merged = when {
-                query.isBlank() -> mergeCatalog(remote, catalog, installed)
-                remote.isEmpty() -> mergeCatalog(emptyList(), catalog, installed)
-                else -> remote
-            }
-            val withCompat =
-                if (checkCompat) merged.map { attachCompat(it) } else merged
-            onDone(withCompat, result.exceptionOrNull()?.message)
+            val q = query.trim().lowercase()
+            val filtered = all.asSequence()
+                .filter { category.isBlank() || it.category == category }
+                .filter { e ->
+                    q.isEmpty() ||
+                        e.pkg.lowercase().contains(q) ||
+                        e.name.lowercase().contains(q) ||
+                        e.desc.lowercase().contains(q) ||
+                        e.descEn.lowercase().contains(q)
+                }
+                .map { it.copy(installedVer = installed[it.pkg]) }
+                .toList()
+            // 兼容性判定是网络操作：只对前 N 条做，避免一次浏览发几百个请求。
+            // 其余保持 UNKNOWN，用户点进详情时会按需补。
+            val withCompat = if (checkCompat) {
+                filtered.take(COMPAT_PROBE_LIMIT).map { attachCompat(it) } + filtered.drop(COMPAT_PROBE_LIMIT)
+            } else filtered
+            onDone(withCompat, null)
         }, "dsh-market-browse").apply { isDaemon = true; start() }
     }
 
@@ -273,25 +298,58 @@ object PluginMarket {
         return out
     }
 
-    private fun fetchCatalog(): List<Entry> = runCatching {
-        val text = httpGet(CATALOG_URL)
-        val arr = org.json.JSONArray(text)
-        (0 until arr.length()).map { i ->
+    /**
+     * 读取内置插件目录（dsh-market 的 dsh-plugin-catalog，format 1）。
+     *
+     * ## 为什么用内置而不是实时搜 npm
+     *
+     * npm 搜索只返回包名 + 一句话，没有分类、没有中文描述、没有版本历史。而
+     * dsh-market（8.8k star 的官方级项目）维护的目录有 **3540 个插件、23 个分类、
+     * 中英双语描述**，且每条都带仓库与主页。整份目录压缩后约 1.7MB，内置进 APK
+     * 换来「离线可浏览 + 分类筛选 + 双语」，比实时搜索值得。
+     *
+     * 目录随版本更新（构建时从 npm 的 dsh-plugin-catalog 取最新版）。
+     */
+    private fun fetchCatalog(ctx: Context?): List<Entry> = runCatching {
+        val text = ctx?.assets?.open(CATALOG_ASSET)?.use {
+            it.readBytes().toString(Charsets.UTF_8)
+        } ?: return emptyList()
+        val root = JSONObject(text)
+        val arr = root.getJSONArray("plugins")
+        val out = ArrayList<Entry>(arr.length())
+        for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
-            Entry(
-                pkg = o.getString("package"),
-                name = o.optString("id", o.getString("package").substringAfterLast('/')),
-                desc = o.optString("desc", ""),
-                repo = o.optString("repo", ""),
-                official = true,
+            val descObj = o.optJSONObject("desc")
+            out.add(
+                Entry(
+                    pkg = o.getString("name"),
+                    name = o.optString("title", o.getString("name").substringAfterLast('/')),
+                    desc = descObj?.optString("zh", "") ?: "",
+                    descEn = descObj?.optString("en", "") ?: "",
+                    category = o.optString("cat", ""),
+                    version = o.optString("ver", ""),
+                    repo = o.optString("repo", ""),
+                    homepage = o.optString("home", ""),
+                    updatedAt = o.optLong("ts", 0L) * 1000L,
+                ),
             )
         }
+        out
     }.getOrElse {
-        // 远端清单拉不到（网络重置/离线）→ 用内置精选兜底，保证市场不空屏。
-        // 旧版（v1.2.113）就有这份 BUILTIN 清单，不能因为重写丢掉。
-        Log.w(TAG, "catalog fetch failed (${it.message}); using bundled picks")
-        PluginCenter.bundledCatalog()
+        Log.w(TAG, "bundled catalog read failed: ${it.message}")
+        emptyList()
     }
+
+    /** 目录里的分类（id → 当前语言的标题），供筛选器使用 */
+    fun categories(ctx: Context): List<Pair<String, String>> = runCatching {
+        val text = ctx.assets.open(CATALOG_ASSET).use { it.readBytes().toString(Charsets.UTF_8) }
+        val cats = JSONObject(text).getJSONObject("metadata").getJSONObject("categories")
+        val chinese = java.util.Locale.getDefault().language == "zh"
+        cats.keys().asSequence().map { id ->
+            val t = cats.getJSONObject(id).getJSONObject("title")
+            id to (if (chinese) t.optString("zh", id) else t.optString("en", id))
+        }.toList()
+    }.getOrElse { emptyList() }
 
     // ─────────────────────────────────────────────────────────────────────
     // 单包详情（点进详情时按需拉，避免列表阶段 100 个请求）

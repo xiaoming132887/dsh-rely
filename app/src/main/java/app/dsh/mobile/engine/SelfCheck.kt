@@ -148,10 +148,10 @@ object SelfCheck {
         // 架构：与设备 ABI 比对（跨架构会让 execve 直接被 linker 拒绝）
         runCatching {
             val actual = ReadElfMachine(node)
-            val expected = when {
-                Build.SUPPORTED_ABIS.contains("arm64-v8a") -> 183
-                Build.SUPPORTED_ABIS.contains("x86_64") -> 62
-                Build.SUPPORTED_ABIS.contains("armeabi-v7a") -> 40
+            val expected = when (Build.SUPPORTED_ABIS.firstOrNull()) {
+                "arm64-v8a" -> 183
+                "x86_64" -> 62
+                "armeabi-v7a" -> 40
                 else -> 0
             }
             out += if (actual > 0 && expected > 0 && actual != expected) {
@@ -161,6 +161,21 @@ object SelfCheck {
             }
         }.onFailure {
             out += Item("runtime.arch", "CPU architecture", Item.Status.WARN, it.message ?: "unreadable")
+        }
+
+        // v1.4.20：内置 SSH 插件与 runtime 解耦，重装 runtime 后由 HardsshInstaller 补装。
+        // 缺失只影响 SSH 工作区，不算运行时故障。
+        val sshPkg = File(root, "lib/node_modules/@xiaopb/dsh-hardssh/package.json")
+        out += if (sshPkg.isFile) {
+            val ver = runCatching {
+                org.json.JSONObject(sshPkg.readText()).optString("version")
+            }.getOrDefault("?")
+            Item("runtime.ssh", "Bundled SSH plugin", Item.Status.OK, "v$ver")
+        } else {
+            Item(
+                "runtime.ssh", "Bundled SSH plugin", Item.Status.WARN,
+                "not installed (SSH workspace disabled)",
+            )
         }
 
         return out

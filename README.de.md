@@ -1,4 +1,4 @@
-﻿# DSH Mobile
+# DSH Mobile
 
 **Der vollständige Android-Port von DeepSeek Harness — die offizielle dsh-Engine läuft unverändert in der App-Sandbox. Ohne Root, ohne Termux, ohne PC.**
 
@@ -50,7 +50,7 @@ Alle Werte stammen aus Tests auf echten Geräten und im Emulator, nicht aus der 
 | **Kaltstart bis Engine bereit** | **< 10 s** | OnePlus 15T (Android 16), echtes Gerät; ~15 s auf Tablets |
 | **Speicher mit parallelen Diensten** | **< 400 MB** | Engine + mehrere Toolchains gleichzeitig |
 | **Android-Kompatibilität** | **8.0 → 16** | WebView ≥ Chrome 85 erforderlich (siehe unten) |
-| **APK-Größe** | **~227 MB** | Vollständige Node.js-Laufzeit + 19 Erweiterungs-Toolchains + integriertes SSH-Workspace-Plugin |
+| **APK-Größe** | **voll ~150–230 MB / schlank ~25 MB** | Vollversion enthält Node.js; die noruntime-Variante lädt die Laufzeit beim ersten Start |
 | **Toolchains** | **19 One-Tap-Installationen** | Python/Go/Rust/Clang/OpenJDK/FFmpeg… |
 
 Zum Vergleich: Termux-Snapshot-basierte Alternativen brauchen beim ersten Start üblicherweise **mehrere Minuten** (Entpacken + manuelle Initialisierung); DSH Mobile liefert seine Laufzeit im APK aus — installieren und loslegen.
@@ -104,7 +104,9 @@ Zu jeder Fähigkeit gibt es ein eigenes Dokument (Design-Abwägungen, Messwerte,
 | [UI-Plugins für schmale Bildschirme](docs/NARROW_UI.en.md) | Seitenleiste über volle Breite / Einstellungen neu angeordnet / rechtes Panel bildschirmfüllend |
 | [LAN-WebUI](docs/LAN_WEBUI.en.md) | Reverse-Proxy, 6-stelliger Code, dauerhafte Erinnerung und Stopp-Kette |
 | [Spracheingabe](docs/VOICE_INPUT.en.md) | zwei Erkennungskanäle, Sende-Deduplizierung, Panel-Parking, bekanntes Problem |
+| [Desktop-Pet-Overlay](docs/PET_OVERLAY.md) | reserviertes, plugin-gesteuertes Pet: Bridge muss `@xiaopb/dsh-pet-bridge` >=0.3.1 sein (Token), Fünf-Feld-Protokoll, Paketimport und Lizenz |
 | [Benachrichtigungen & Hintergrund](docs/NOTIFICATIONS.en.md) | KI-Fortschritt, Aufgabenende, LAN-Erinnerung, sauberes Beenden |
+| [Versionshinweise (Archiv)](docs/release-notes/) | `RELEASE_NOTES_*.md` je Version (ab v1.3.0) außerhalb des Repo-Roots archiviert |
 
 ## ⛔ Grenzen (bitte beachten)
 
@@ -167,18 +169,31 @@ Normaler Modus ist der Standard; Optionen, deren Fähigkeit noch nicht bereitste
 
 ## 📦 Installation
 
-**Release herunterladen (empfohlen)**: Hol dir die APK von [Releases](https://github.com/Soodok/Deepseek-Harness-Local-Android/releases) (für Smartphones `arm64-v8a` wählen; aktuell **v1.4.17**), und installiere sie, nachdem du Installationen unbekannter Quellen erlaubt hast. Jede Version ab v1.0.0 lässt sich über die bestehende App installieren.
+**Release herunterladen (empfohlen)**: Hol dir die APK von [Releases](https://github.com/Soodok/Deepseek-Harness-Local-Android/releases) (für Smartphones `arm64-v8a` wählen; aktuell **v1.4.20**).
+
+> 📦 **Welche Datei?**
+> - **Vollversion** (ohne `-noruntime`): enthält die Node.js-Laufzeit (~150–230 MB), offline nutzbar.
+> - **noruntime** (`*-noruntime.apk`): deutlich kleiner; lädt die Laufzeit beim ersten Start über den Link in `MANIFEST.json`. Standardmäßig über den `gh-proxy.org`-Präfixproxy (direkte GitHub-Downloads sind in einigen Regionen unzuverlässig); änderbar unter Einstellungen → Erweiterungen → Runtime-Download-Proxy, inklusive direkter Verbindung. App-Updates laden die Laufzeit nicht erneut.
+>
+> Beide enthalten das integrierte SSH-Plugin; Laufzeit-Updates gibt es unter „Über → Runtime“.
+> `-debug`-Builds sind nur zum Testen; Release und Debug lassen sich nicht gegenseitig installieren.
 
 **Aus dem Quelltext bauen** (JDK 17 + Android SDK, NDK r26+, CMake 3.22.1):
 
 ```bash
-./scripts/collect-termux-runtime.sh app/src/main/assets/runtime.zip aarch64
-gradle assembleDebug -Pabi=arm64-v8a
+# Linux/CI: einheitliche Runtime-Pipeline
+./scripts/build-runtime.sh --abi arm64-v8a --out dist/runtime-arm64-v8a.zip
+
+# Vollversion
+gradle assembleDebug -Ppackage=full -PruntimeZip="$PWD/dist/runtime-arm64-v8a.zip" \
+  -PhardsshDir="$PWD/dist/hardssh"
+# noruntime
+gradle assembleDebug -Ppackage=noruntime -PhardsshDir="$PWD/dist/hardssh"
 ```
 
 Alternativ: Forke das Repository und lasse den Workflow **android-build** auf GitHub Actions in der Cloud ein APK bauen.
 
-**Systemvoraussetzungen**: Android 8.0+ (**WebView ≥ Chrome 85**, siehe Grenzen) · arm64-v8a / x86_64 · **700 MB+ freier Speicher empfohlen** (APK ~227 MB plus die ~494 MB entpackte Laufzeit).
+**Systemvoraussetzungen**: Android 8.0+ (**WebView ≥ Chrome 85**) · arm64-v8a / x86_64 · **1,2 GB+ freier Speicher empfohlen** für ein gestuftes Runtime-Update (Vollversion ~150–230 MB; Laufzeit entpackt ~494 MB).
 
 ## 🚀 Schnellstart
 
@@ -192,13 +207,13 @@ Alternativ: Forke das Repository und lasse den Workflow **android-build** auf Gi
 
 **Wird Root benötigt?** Nein. Der Normal-Modus deckt die überwältigende Mehrheit der Anwendungsfälle ab; Root und Shizuku sind optionale Ausbaustufen.
 
-**Wie verhält sich das zum Termux-Ansatz?** Parallele Routen, kein Ersatz. Die Termux-Route **baut eine Linux-Umgebung** unter Android (manuelle Einrichtung / Ein-Klick-Skript / proot + Ubuntu) und betreibt dsh darin; dieses Projekt **baut die von dsh benötigte Laufzeit direkt ins APK**, sodass du installierst und loslegst — zum Preis eines Pakets von ~227 MB. **Beide betreiben dasselbe dsh** — entscheide danach, welchen Einrichtungsaufwand du für eine Live-Umgebung zahlen willst.
+**Wie verhält sich das zum Termux-Ansatz?** Parallele Routen, kein Ersatz. Die Termux-Route **baut eine Linux-Umgebung** unter Android und betreibt dsh darin; dieses Projekt **baut die Laufzeit ins APK** (Vollversion) oder lädt sie beim ersten Start (noruntime) — **beide betreiben dasselbe dsh**.
 
 **Ist der Agent selbst nachimplementiert?** Nein. Agent-Logik, Plugin-System und WebUI stammen alle vom offiziellen [`@deepseek-ai/dsh`](https://github.com/deepseek-ai/deepseek-harness); dieses Projekt liefert nur die Laufzeitumgebung für Android (bionic-Node.js-Laufzeit, Vordergrunddienst, Berechtigungsstufen, Erweiterungszentrum). Deshalb wird es als **Port** und nicht als Framework bezeichnet.
 
 **Werden meine Daten hochgeladen?** Engine, Sitzungen und Arbeitsbereich liegen vollständig lokal; ob Daten das Gerät verlassen, hängt vom von dir konfigurierten Modell-Dienstendpunkt ab.
 
-**Warum ist die APK ~227 MB groß?** Sie enthält die vollständige bionic-Node.js-Laufzeit (~494 MB entpackt), den Termux-Toolchain-Abschluss (bash / ripgrep / SONAME-Bibliotheken), dshs gesamten Abhängigkeitsbaum (79 Pakete ab 0.2.0) sowie das integrierte SSH-Workspace-Plugin (ab v1.4.18) — der Preis für „ohne Termux, installieren und loslegen". Termux-Lösungen lassen all das extern und vom Nutzer installiert, sind deshalb kleiner, brauchen aber beim ersten Start Minuten an Einrichtung.
+**Warum ist die APK groß?** Die Vollversion enthält die vollständige bionic-Node.js-Laufzeit (~494 MB entpackt), den Termux-Toolchain-Abschluss und dshs Abhängigkeitsbaum. Seit v1.4.20 gibt es zusätzlich ein **noruntime-Paket** ohne Laufzeit: App-Updates bleiben klein, die Laufzeit wird beim ersten Start geladen und kann separat aktualisiert werden.
 
 **Wie zeigt mir der Agent eine Webseite?** Bitte ihn, einen lokalen HTTP-Server zu starten, und er übergibt dir einen `http://127.0.0.1:<Port>`-Link; tippe darauf, um die Vorschau zu öffnen.
 

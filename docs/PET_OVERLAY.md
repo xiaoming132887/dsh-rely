@@ -1,0 +1,113 @@
+# 桌宠悬浮窗（预留能力，插件驱动）
+
+DSH Mobile 现在预留了一套系统级桌宠悬浮窗：**安装包不包含桌宠插件，也不包含任何动画素材**。用户自行安装桥插件后，到「设置 → 扩展 → 桌面宠物」开启即可。
+
+> **插件来源与版本声明（v1.4.21 起）**
+>
+> 桥插件必须是 **`@xiaopb/dsh-pet-bridge` ≥ 0.3.1**（npm 包名或 GitHub 仓库
+> `https://github.com/XiaoPb/dsh-pet-bridge` 均可）。原因：
+>
+> - `/bubble` 从协议 v2 起强制 `X-DSH-Pet-Token`（fail-closed，缺失/不匹配 403），token 支持从 0.3.1 起才有；
+> - 0.3.1 同时修了上游 `dsh-pet-bridge@0.1.0` 的真 bug —— 它 POST 不带 `Content-Length`（Node 走 chunked 编码），原生侧只按定长读 body，**必然回 400**；
+> - npm 上那个无 scope 的 `dsh-pet-bridge` 只到 0.1.0（归上游作者所有，无法发新版），**装上也不通**。App 会在设置页直接标注「需 0.3.1+」并禁止开启，不会让你对着静默失败排查。
+>
+> 低于 0.3.1 的版本属于「已安装但不兼容」，不是「没装」——两者在设置页的提示不同。
+
+## 1. 它是什么
+
+- 原生侧只做「身体」：`TYPE_APPLICATION_OVERLAY` 悬浮窗、前台服务、手势、动画播放、气泡。
+- 状态来源是 dsh 生态里的 `dsh-pet-bridge` 插件（纯 JS，安装在 web profile 里）。
+- 桥插件监听 `turn/start`、`tool/call`、`tool/result`、`turn/end`、`agent/disposed`，向 `127.0.0.1:7779` 发送五字段 JSON：
+
+```json
+{
+  "kind": "user|pre|post|stop",
+  "agent_source": "dsh",
+  "tool_name": "read",
+  "tool_input": { "file_path": "README.md" },
+  "caller_pid": 12345
+}
+```
+
+协议里**没有气泡文本**。气泡由原生侧根据 `kind + tool_name + tool_input` 拼出来，只显示截断后的摘要，不显示完整参数。
+
+## 2. 安装与开启
+
+1. 先正常启动引擎。
+2. 安装桥插件（**≥ 0.3.1**，二选一）：
+   - npm：`dsh plugin add @xiaopb/dsh-pet-bridge`，或在 App 的插件中心搜 `dsh-pet-bridge`，选名为 `@xiaopb/dsh-pet-bridge` 的条目（v1.4.24 起内置目录里已用它替换上游 0.1.0 条目）；
+   - GitHub：`dsh plugin add github:XiaoPb/dsh-pet-bridge`。
+3. **重启引擎**（bundle 插件不会热加载）。
+4. 设置 → 扩展 → 桌面宠物 → 授予「显示在其他应用上层」。
+5. 打开「开启桌宠」。通知栏会出现常驻通知，点「收起来」即停止。
+
+> 不要手工改 `profiles/web/package.json`，也不需要桌面端的 symlink 安装法。Android 壳的插件中心走的是官方 `dsh plugin --profile web add`，和现有社区插件同一条路径。
+
+## 3. 动画包（可选）
+
+没有动画包时，桌宠显示内置的 Canvas 占位鲸鱼，仍然会响应状态与手势。想要原版 106 段动画，请自行准备 `dsh-pet-android` 的 WebP 素材包：
+
+- 下载 `dsh-pet-android` 的 300p / 480p / 640p APK，或同结构的 zip；
+- 在「桌面宠物 → 导入动画包（APK/zip）」里选择它；
+- 导入器会从 APK 的 `assets/pet-config.json` 与 `assets/webp/*.webp`（或 zip 根目录的 `pet-config.json` + `webp/`）提取；
+- 推荐 300p（约 80MB）：内存、解码、存储都更轻；480p 更适合高配设备。
+
+**许可提醒：** 动画素材来自上游 `dsh-pet`，其许可为「允许开源使用，禁止商用」（non-commercial）。本仓库不提交、不打包这些素材；导入的是用户自己提供的文件。代码是 MIT；物理公式移植自 `dsh-pet-android`（MIT），见仓库根目录 `NOTICE`。
+
+导入器会拒绝：路径穿越、绝对路径、超过 2000 个 entry、单文件 >50MB、总解压 >600MB、空间不足、缺少 idle/clicks 动画的包。失败会保留旧包。
+
+## 4. 状态映射（默认）
+
+| 桥事件 | 桌宠表现 | 默认段 |
+|---|---|---|
+| `user` | 思考，循环 | a055 工作状态-思考冒泡 |
+| `pre` + read/grep/search | 探索/搜索，循环 | a052 / 读取气泡 |
+| `pre` + write/edit | 工作，循环 | a054 工作状态-忙碌点按 |
+| `pre` + bash/shell/exec | 忙碌，循环 | a054 |
+| `post` | 短促确认（1.2s） | a056 工作状态-清点归档 |
+| `stop` | 庆祝（2s）后回待机 | a057 工作状态-雀跃庆祝 |
+| 未来 `error` | 垂头（2.5s） | a053 工作状态-垂头叹气冒汗 |
+| 空闲 | 待机呼吸 | a058 待机呼吸休闲 |
+
+`stop` 有 1.5s 宽限，避免多 agent 的 stop 抢掉仍在工作的会话。引擎被杀时，Service 每 30s 检查一次，长时间无事件则回待机。
+
+## 5. 手势
+
+- 单击：Q 弹 + 随机点击回应（a077–a081）；
+- 长按：动作菜单（待机/点击回应/随机动作、回位、翻转、设置、收起）；
+- 拖动：跟手移动；
+- 快速甩出：抛物线 + 撞边反弹 + 地面摩擦。
+
+已知限制：悬浮窗是矩形，透明像素仍会消耗触摸；这是 Android overlay 的输入模型限制。
+
+## 6. 权限、保活与排障
+
+- 必需：`SYSTEM_ALERT_WINDOW`（用户手动授予）、前台服务通知（Android 13+ 可选授权）。
+- 服务被系统回收后，只有 `pet_enabled=true` 才会 `START_STICKY` 重新拉起；用户点「收起来」或显式退出引擎则清除偏好。
+- 不注册开机自启；打开 App 时按偏好恢复。
+- 端口 `7779` 被占用（例如 cc-pet 正在运行）时，状态会显示「端口被占用」，桌宠仍可显示但不接收事件；停掉占用者后重新开启。
+- 桥插件装了但没重启引擎 / 没进 profile bundles：状态显示「已安装，请重启引擎」。
+- 厂商后台限制（小米省电策略、荣耀电池优化等）需要用户手动允许后台活动；不承诺 100% 常驻。
+
+## 7. 安全边界
+
+- 接收器只绑 `127.0.0.1:7779`，不暴露局域网。
+- **鉴权（v1.4.21）**：`/bubble` 要求请求头 `X-DSH-Pet-Token` 等于桥 token。token 由 App 每进程随机生成（不落盘、不复用），经引擎环境变量 `DSH_PET_BRIDGE_TOKEN` 只交给引擎内的桥插件 —— 同设备第三方 App 拿不到，伪造表情/气泡的通道被关闭（照抄 AgentBridge v1.2.99 的先例，fail-closed：缺失/不匹配一律 403）。`/ping` 免鉴权，仅暴露服务存在性。
+- 请求体 ≤8KB、头 ≤8KB、5s 超时、2 个 worker。
+- 只解析五字段；工具摘要再截断/清洗一次；不记录完整参数。
+- 动画包只写 `filesDir/pet/`，不碰 `dsh-home` / `profiles`。
+- 端口 `7779` 被占用（例如 cc-pet 正在运行）时，状态会显示「端口被占用」，桌宠仍可显示但不接收事件；停掉占用者后重新开启。
+
+> 桥插件必须使用 **`@xiaopb/dsh-pet-bridge` ≥ 0.3.1**（POST 时从 `process.env.DSH_PET_BRIDGE_TOKEN` 读 token 加 `X-DSH-Pet-Token` 头，并显式带 `Content-Length`）。上游 0.1.0 既无 token（403）也不带 `Content-Length`（400），不兼容。
+
+## 8. 故障排查（桥插件侧）
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 设置页显示「需 0.3.1+」，无法开启 | 装的是旧版（多半是 npm 上游 `dsh-pet-bridge@0.1.0`） | 换 `@xiaopb/dsh-pet-bridge@0.3.1+`，重启引擎 |
+| 带 token 仍返回 `400` | 插件未带 `Content-Length`（0.1.0 的 chunked 编码） | 升级到 0.3.1+ |
+| 返回 `403` | token 缺失或不匹配：插件旧版、或引擎未重启导致 token 未注入 | 升级插件 + 重启引擎 |
+| 通知显示「已连接」但从不弹气泡 | 插件装了但没进 `dsh.profile.bundles`，引擎未加载 | 设置页点「重启引擎」；仍不行则重装插件 |
+| 端口 `7779` 被占用 | 其他桌宠工具（如 cc-pet）在跑 | 停掉占用者后重新开启桌宠 |
+
+`/ping` 返回的 `protocol` 字段可用于确认协议版本：`2` 表示带 token 门控的新版；`1` 表示旧 APK。
