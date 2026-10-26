@@ -25,7 +25,11 @@ val releaseProps = Properties().apply {
 }
 
 fun releaseSetting(envName: String, propName: String): String? =
-    (System.getenv(envName) ?: releaseProps.getProperty(propName))?.takeIf { it.isNotBlank() }
+    // 注意：CI 里 env 变量即使 secret 未配置也会被设为空字符串（而不是不存在），
+    // 所以必须先判空再回落到 keystore/release.properties —— 否则提交进仓库的
+    // 固定签名材料会被空 env 覆盖，debug 包又退回随机的 Android Debug 签名。
+    System.getenv(envName)?.takeIf { it.isNotBlank() }
+        ?: releaseProps.getProperty(propName)?.takeIf { it.isNotBlank() }
 
 val releaseStorePath = releaseSetting("DSH_RELEASE_STORE_FILE", "storeFile")
     ?: rootProject.file("keystore/dsh-release.keystore").absolutePath
